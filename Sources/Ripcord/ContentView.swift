@@ -69,6 +69,13 @@ struct ContentView: View {
                             fileTranscribeURL = nil
                         }
                     }
+                } else if case .loadingModels = manager.transcriptionService.state {
+                    HStack(spacing: 4) {
+                        ProgressView().controlSize(.small)
+                        Text("Loading models…")
+                            .font(.caption2)
+                            .foregroundStyle(.secondary)
+                    }
                 } else if case .downloadingModels = manager.transcriptionService.state {
                     HStack(spacing: 4) {
                         ProgressView().controlSize(.small)

@@ -288,7 +288,7 @@ final class RecordingManager: @unchecked Sendable {
 
         if !transcriptionService.modelsReady
             && TranscriptionService.modelsExistOnDisk(config: transcriptionConfig) {
-            Task { await transcriptionService.prepareModels(config: transcriptionConfig) }
+            Task { await transcriptionService.prepareModels(config: transcriptionConfig, fromCache: true) }
         }
     }
 

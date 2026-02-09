@@ -4,6 +4,7 @@ import TranscribeKit
 
 enum TranscriptionState: Equatable {
     case idle
+    case loadingModels
     case downloadingModels(Double)
     case ready
     case transcribing
@@ -21,16 +22,18 @@ final class TranscriptionService: @unchecked Sendable {
 
     // MARK: - Model Lifecycle
 
-    func prepareModels(config: TranscriptionConfig) async {
+    func prepareModels(config: TranscriptionConfig, fromCache: Bool = false) async {
         guard state == .idle || isFailedState || state == .ready else { return }
 
-        await MainActor.run { state = .downloadingModels(0) }
+        await MainActor.run { state = fromCache ? .loadingModels : .downloadingModels(0) }
 
         do {
             let version: ModelVersion = config.asrModelVersion == .v2 ? .v2 : .v3
             try await transcriber.prepareModels(version: version) { [weak self] progress in
-                Task { @MainActor in
-                    self?.state = .downloadingModels(progress)
+                if !fromCache {
+                    Task { @MainActor in
+                        self?.state = .downloadingModels(progress)
+                    }
                 }
             }
 

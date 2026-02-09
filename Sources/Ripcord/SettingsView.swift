@@ -139,6 +139,13 @@ struct SettingsView: View {
                 .font(.caption)
                 .foregroundStyle(.secondary)
 
+        case .loadingModels:
+            ProgressView()
+                .controlSize(.small)
+            Text("Loading models\u{2026}")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
         case .downloadingModels(let progress):
             ProgressView(value: progress)
             Text("Downloading models\u{2026}")
