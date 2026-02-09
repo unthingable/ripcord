@@ -100,9 +100,6 @@ struct ContentView: View {
         .frame(width: 260)
         .onAppear {
             setupGlobalHotkey()
-            // Launch in unstructured Task so it survives MenuBarExtra
-            // view recreation during macOS permission dialogs.
-            Task { await manager.startBufferingOnce() }
         }
     }
 

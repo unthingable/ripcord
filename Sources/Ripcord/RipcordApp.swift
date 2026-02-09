@@ -2,7 +2,13 @@ import SwiftUI
 
 @main
 struct RipcordApp: App {
-    @State private var manager = RecordingManager()
+    @State private var manager: RecordingManager
+
+    init() {
+        let mgr = RecordingManager()
+        _manager = State(initialValue: mgr)
+        Task { await mgr.startBufferingOnce() }
+    }
 
     var body: some Scene {
         MenuBarExtra {
