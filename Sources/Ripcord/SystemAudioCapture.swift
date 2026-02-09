@@ -3,6 +3,8 @@ import AudioToolbox
 
 final class SystemAudioCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.vibe.ripcord.systemaudio")
+    deinit { stop() }
+
     var onSamples: (([Float]) -> Void)?
     private var tapID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)

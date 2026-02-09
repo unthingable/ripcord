@@ -8,6 +8,10 @@ struct RipcordApp: App {
         let mgr = RecordingManager()
         _manager = State(initialValue: mgr)
         Task { await mgr.startBufferingOnce() }
+        NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification,
+            object: nil, queue: .main
+        ) { _ in mgr.shutdown() }
     }
 
     var body: some Scene {

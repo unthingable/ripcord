@@ -24,6 +24,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
         }
+        stop()
     }
 
     func start(deviceID: AudioDeviceID? = nil) throws {
@@ -34,6 +35,11 @@ final class MicrophoneCapture: @unchecked Sendable {
         }
         _isRunning = true
         stateLock.unlock()
+
+        // Re-register config change handler (removed by stop())
+        if configChangeObserver == nil {
+            registerConfigChangeHandler()
+        }
 
         currentDeviceID = deviceID
 
@@ -140,6 +146,14 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func stop() {
+        // Remove observer first to prevent handleConfigChange from restarting
+        // the engine after we stop it (e.g., when SystemAudioCapture tears down
+        // its aggregate device, triggering an AVAudioEngineConfigurationChange).
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
+        }
+
         stateLock.lock()
         guard _isRunning else {
             stateLock.unlock()
@@ -165,6 +179,13 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     private func handleConfigChange() {
         // Engine has been stopped by the system. Restart if we were running.
+        // Remove observer first to prevent re-entrant config change notifications
+        // during restart (installing a new tap can trigger another notification).
+        if let observer = configChangeObserver {
+            NotificationCenter.default.removeObserver(observer)
+            configChangeObserver = nil
+        }
+
         stateLock.lock()
         let wasRunning = _isRunning
         _isRunning = false
@@ -176,7 +197,8 @@ final class MicrophoneCapture: @unchecked Sendable {
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
 
-        // Restart the engine, trying the previously selected device first
+        // Restart the engine, trying the previously selected device first.
+        // start() re-registers the config change observer.
         do {
             try start(deviceID: currentDeviceID)
         } catch {

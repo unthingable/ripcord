@@ -661,8 +661,8 @@ final class RecordingManager: @unchecked Sendable {
         elapsedTimer = nil
         waveformTimer?.invalidate()
         waveformTimer = nil
-        systemCapture.stop()
         micCapture.stop()
+        systemCapture.stop()
     }
 
     // MARK: - Stereo Interleaving
