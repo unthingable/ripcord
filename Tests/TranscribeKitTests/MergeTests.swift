@@ -78,6 +78,146 @@ test("Word far from any segment returns nil") {
     assertNil(findSpeakerByOverlap(wordStart: 10.0, wordEnd: 10.5, in: segments))
 }
 
+print("\nContinuity bias:")
+
+test("Boundary word stays with previous speaker on marginal overlap") {
+    // Word at 4.8-5.2s straddles A (0-5s) and B (5-10s)
+    // Overlap A = 0.2s, Overlap B = 0.2s — equal, but with continuity bias A wins
+    let segments = [
+        makeSeg(speaker: "A", start: 0, end: 5),
+        makeSeg(speaker: "B", start: 5, end: 10),
+    ]
+    let result = findSpeakerByOverlap(
+        wordStart: 4.8, wordEnd: 5.2, in: segments, previousSpeaker: "A")
+    assertEqual(result, "A", "marginal overlap should stay with previous speaker")
+}
+
+test("Clear speaker change overrides continuity bias") {
+    // Word at 6.0-7.0s: overlap A=0, overlap B=1.0s — clearly B despite bias toward A
+    let segments = [
+        makeSeg(speaker: "A", start: 0, end: 5),
+        makeSeg(speaker: "B", start: 5, end: 10),
+    ]
+    let result = findSpeakerByOverlap(
+        wordStart: 6.0, wordEnd: 7.0, in: segments, previousSpeaker: "A")
+    assertEqual(result, "B", "clear overlap majority should override continuity bias")
+}
+
+test("Continuity bias only applies when previous speaker has overlap") {
+    // Word at 6.0-7.0s: only B has overlap. Even though previousSpeaker is A,
+    // A has no overlap so bias doesn't apply.
+    let segments = [
+        makeSeg(speaker: "A", start: 0, end: 5),
+        makeSeg(speaker: "B", start: 5, end: 10),
+    ]
+    let result = findSpeakerByOverlap(
+        wordStart: 6.0, wordEnd: 7.0, in: segments, previousSpeaker: "A")
+    assertEqual(result, "B", "bias should not apply when previous speaker has no overlap")
+}
+
+test("No previous speaker behaves as before") {
+    // Word at 4.8-5.2s straddles A and B equally — without bias, either could win
+    // but without previousSpeaker the function should still return a result
+    let segments = [
+        makeSeg(speaker: "A", start: 0, end: 5),
+        makeSeg(speaker: "B", start: 5, end: 10),
+    ]
+    let result = findSpeakerByOverlap(
+        wordStart: 4.8, wordEnd: 5.2, in: segments, previousSpeaker: nil)
+    assert(result == "A" || result == "B", "should return some speaker without bias")
+}
+
+print("\nSnap transitions to pauses:")
+
+test("Boundary words snapped back to previous speaker when no pause") {
+    // S2 says "у него ограниченный", then S1 says "у меня предложение"
+    // No pause between "него" and "ограниченный" (0.08s gap) — continuous speech
+    // Real pause (0.4s) between "ограниченный" and "у" — actual transition
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("у", start: 10.0, end: 10.2), speaker: "A"),
+        SpeakerWord(word: makeWord("него", start: 10.3, end: 10.6), speaker: "A"),
+        // Transition here, but only 0.08s gap — continuous speech
+        SpeakerWord(word: makeWord("ограниченный", start: 10.68, end: 11.7), speaker: "B"),
+        // Real pause: 0.4s gap
+        SpeakerWord(word: makeWord("у", start: 12.1, end: 12.2), speaker: "B"),
+        SpeakerWord(word: makeWord("меня", start: 12.3, end: 12.5), speaker: "B"),
+    ]
+    snapTransitionsToPauses(&words)
+    assertEqual(words[2].speaker, "A", "ограниченный should snap back to A")
+    assertEqual(words[3].speaker, "B", "у should stay with B (after the pause)")
+    assertEqual(words[4].speaker, "B", "меня should stay with B")
+}
+
+test("Transition at a pause left alone") {
+    // Clear pause (0.5s) at the transition — diarizer probably got it right
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("hello", start: 0, end: 0.3), speaker: "A"),
+        SpeakerWord(word: makeWord("there", start: 0.4, end: 0.7), speaker: "A"),
+        // 0.5s pause — real turn-taking gap
+        SpeakerWord(word: makeWord("yes", start: 1.2, end: 1.4), speaker: "B"),
+        SpeakerWord(word: makeWord("indeed", start: 1.5, end: 1.8), speaker: "B"),
+    ]
+    snapTransitionsToPauses(&words)
+    assertEqual(words[0].speaker, "A")
+    assertEqual(words[1].speaker, "A")
+    assertEqual(words[2].speaker, "B", "transition at pause should not be changed")
+    assertEqual(words[3].speaker, "B")
+}
+
+test("Word cap limits reassignment") {
+    // No pause anywhere, but cap at 3 words prevents runaway reassignment
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("a", start: 0, end: 0.2), speaker: "A"),
+        // Transition, no pause (0.1s gap)
+        SpeakerWord(word: makeWord("b", start: 0.3, end: 0.5), speaker: "B"),
+        SpeakerWord(word: makeWord("c", start: 0.6, end: 0.8), speaker: "B"),
+        SpeakerWord(word: makeWord("d", start: 0.9, end: 1.1), speaker: "B"),
+        SpeakerWord(word: makeWord("e", start: 1.2, end: 1.4), speaker: "B"),
+        SpeakerWord(word: makeWord("f", start: 1.5, end: 1.7), speaker: "B"),
+    ]
+    snapTransitionsToPauses(&words)
+    // No pause found within 3 words, so nothing should be reassigned
+    assertEqual(words[1].speaker, "B", "no snap when no pause found within cap")
+}
+
+test("Multiple words snapped before pause") {
+    // Two words with no pauses, then a pause — both should snap back
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("x", start: 0, end: 0.3), speaker: "A"),
+        // Transition, tiny gap
+        SpeakerWord(word: makeWord("y", start: 0.35, end: 0.6), speaker: "B"),
+        SpeakerWord(word: makeWord("z", start: 0.65, end: 0.9), speaker: "B"),
+        // Real pause: 0.5s
+        SpeakerWord(word: makeWord("w", start: 1.4, end: 1.7), speaker: "B"),
+    ]
+    snapTransitionsToPauses(&words)
+    assertEqual(words[1].speaker, "A", "y should snap back to A")
+    assertEqual(words[2].speaker, "A", "z should snap back to A")
+    assertEqual(words[3].speaker, "B", "w stays with B (after pause)")
+}
+
+test("No transitions means no changes") {
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("a", start: 0, end: 0.2), speaker: "A"),
+        SpeakerWord(word: makeWord("b", start: 0.3, end: 0.5), speaker: "A"),
+        SpeakerWord(word: makeWord("c", start: 0.6, end: 0.8), speaker: "A"),
+    ]
+    snapTransitionsToPauses(&words)
+    assertEqual(words[0].speaker, "A")
+    assertEqual(words[1].speaker, "A")
+    assertEqual(words[2].speaker, "A")
+}
+
+test("Nil speakers at transition are skipped") {
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("a", start: 0, end: 0.2), speaker: "A"),
+        SpeakerWord(word: makeWord("b", start: 0.25, end: 0.5), speaker: nil),
+        SpeakerWord(word: makeWord("c", start: 0.55, end: 0.8), speaker: "B"),
+    ]
+    snapTransitionsToPauses(&words)
+    assertNil(words[1].speaker, "nil speaker should not be touched by snap pass")
+}
+
 print("\nNil speaker absorption:")
 
 test("Nil-speaker word inherits nearest neighbor") {

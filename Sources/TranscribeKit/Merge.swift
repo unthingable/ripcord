@@ -69,9 +69,15 @@ public func mergeTokensIntoWords(_ tokenTimings: [TokenTiming]) -> [WordTiming] 
 
 /// Find the speaker for a word by computing overlap with diarization segments.
 /// Falls back to nearest segment within 2s if there is no overlap.
+///
+/// When `previousSpeaker` is provided and has overlap with the current word, a small
+/// continuity bonus is added to their overlap before comparing. This makes speaker
+/// transitions "sticky" — a switch only happens when there's a clear overlap majority
+/// for the new speaker, preventing boundary bleed at speaker transitions.
 public func findSpeakerByOverlap(
     wordStart: Double, wordEnd: Double,
-    in segments: [TimedSpeakerSegment]
+    in segments: [TimedSpeakerSegment],
+    previousSpeaker: String? = nil
 ) -> String? {
     // Compute overlap per speaker
     var speakerOverlap: [String: Double] = [:]
@@ -84,6 +90,12 @@ public func findSpeakerByOverlap(
         if overlap > 0 {
             speakerOverlap[seg.speakerId, default: 0] += overlap
         }
+    }
+
+    // Apply continuity bias: give previous speaker a bonus to prevent boundary bleed
+    let continuityBonus = 0.08
+    if let prev = previousSpeaker, speakerOverlap[prev] != nil {
+        speakerOverlap[prev]! += continuityBonus
     }
 
     // Pick speaker with greatest total overlap
@@ -112,6 +124,83 @@ public func findSpeakerByOverlap(
         }
     }
     return bestDistance <= 2.0 ? bestSpeaker : nil
+}
+
+// MARK: - Snap Transitions to Pauses
+
+/// Correct diarization boundary lag by snapping speaker transitions to actual speech pauses.
+///
+/// Diarization models produce segment boundaries that can lag behind real speaker transitions
+/// by up to a full word duration. When this happens, the last word(s) of the outgoing speaker
+/// fall entirely within the incoming speaker's diarization segment and get misattributed.
+///
+/// This pass exploits the fact that real speaker transitions almost always coincide with pauses
+/// in speech. ASR word timings are precise enough to detect these pauses. At each speaker
+/// transition where there is no pause (continuous speech), we look ahead for the first real
+/// pause and snap the transition boundary to it, reassigning the intermediate words back to
+/// the previous speaker.
+///
+/// - Parameters:
+///   - words: Speaker-assigned words to correct (modified in place).
+///   - pauseThreshold: Minimum inter-word gap (seconds) that constitutes a real pause.
+///     Typical within-utterance gaps are <0.2s; turn-taking gaps are 0.2-0.5s. Default 0.3s.
+///   - maxWords: Maximum number of words to reassign per transition (safety cap).
+///   - maxDuration: Maximum total duration of reassigned words (safety cap, seconds).
+public func snapTransitionsToPauses(
+    _ words: inout [SpeakerWord],
+    pauseThreshold: Double = 0.3,
+    maxWords: Int = 3,
+    maxDuration: Double = 2.0
+) {
+    guard words.count >= 2 else { return }
+
+    var i = 1
+    while i < words.count {
+        guard words[i].speaker != words[i - 1].speaker,
+              words[i - 1].speaker != nil,
+              words[i].speaker != nil
+        else {
+            i += 1
+            continue
+        }
+
+        // Backward check: if there's already a pause at this transition, it's probably correct
+        let gapAtTransition = words[i].word.startTime - words[i - 1].word.endTime
+        if gapAtTransition >= pauseThreshold {
+            i += 1
+            continue
+        }
+
+        // No pause at transition — look ahead for the first real pause within the new speaker's run
+        let prevSpeaker = words[i - 1].speaker
+        let newSpeaker = words[i].speaker
+        var snapTo: Int? = nil
+        var accumulated = words[i].word.endTime - words[i].word.startTime
+
+        for j in (i + 1)..<words.count {
+            // Stop if we leave the new speaker's run
+            guard words[j].speaker == newSpeaker else { break }
+            // Stop if we'd exceed caps
+            guard (j - i) < maxWords, accumulated < maxDuration else { break }
+
+            let gap = words[j].word.startTime - words[j - 1].word.endTime
+            if gap >= pauseThreshold {
+                snapTo = j
+                break
+            }
+            accumulated += words[j].word.endTime - words[j].word.startTime
+        }
+
+        if let snapTo {
+            // Reassign words [i..<snapTo] to the previous speaker
+            for k in i..<snapTo {
+                words[k].speaker = prevSpeaker
+            }
+            i = snapTo + 1
+        } else {
+            i += 1
+        }
+    }
 }
 
 // MARK: - Speaker Smoothing
@@ -266,22 +355,27 @@ private func mergeWithDiarization(
 ) -> [TranscriptSegment] {
     let diarizationSegments = diarization.segments
 
-    // Step 1: Overlap-based speaker assignment
-    var speakerWords = words.map { word in
-        SpeakerWord(
-            word: word,
-            speaker: findSpeakerByOverlap(
-                wordStart: word.startTime, wordEnd: word.endTime,
-                in: diarizationSegments))
+    // Step 1: Overlap-based speaker assignment with continuity bias
+    var speakerWords: [SpeakerWord] = []
+    var previousSpeaker: String? = nil
+    for word in words {
+        let speaker = findSpeakerByOverlap(
+            wordStart: word.startTime, wordEnd: word.endTime,
+            in: diarizationSegments, previousSpeaker: previousSpeaker)
+        speakerWords.append(SpeakerWord(word: word, speaker: speaker))
+        previousSpeaker = speaker ?? previousSpeaker
     }
 
-    // Step 2: Absorb nil-speaker words into nearest neighbor
+    // Step 2: Snap speaker transitions to actual speech pauses
+    snapTransitionsToPauses(&speakerWords)
+
+    // Step 3: Absorb nil-speaker words into nearest neighbor
     absorbNilSpeakers(&speakerWords)
 
-    // Step 3: Smooth short false speaker switches
+    // Step 4: Smooth short false speaker switches
     smoothSpeakerRuns(&speakerWords)
 
-    // Step 4: Group into segments by speaker continuity
+    // Step 5: Group into segments by speaker continuity
     var segments: [TranscriptSegment] = []
     var currentSpeaker: String? = speakerWords.first?.speaker
     var currentWords: [WordTiming] = []

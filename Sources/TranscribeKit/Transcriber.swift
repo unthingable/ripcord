@@ -104,9 +104,16 @@ public final class Transcriber: @unchecked Sendable {
 
             switch config.quality {
             case .balanced:
-                diarizerConfig.segmentation.stepRatio = 0.1
+                diarizerConfig.segmentation.stepRatio = 0.05
             case .fast:
                 break
+            }
+
+            // FluidAudio defaults to 1.0s minimum segment duration, which discards
+            // brief but real speaker turns at boundaries, shifting them by up to ~1s.
+            // Use a much lower threshold to preserve boundary precision.
+            if config.minSegmentDuration == nil {
+                diarizerConfig.embedding.minSegmentDurationSeconds = 0.1
             }
 
             if let d = config.minSegmentDuration {
