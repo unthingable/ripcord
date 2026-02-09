@@ -490,7 +490,7 @@ struct ContentView: View {
                                 let target = transcribeTarget
                                 transcribeTarget = nil
                                 if let target {
-                                    manager.transcribeRecording(target, config: pendingTranscriptionConfig, overwrite: true)
+                                    manager.transcribeRecording(target, config: pendingTranscriptionConfig)
                                 }
                             } onCancel: {
                                 transcribeTarget = nil
@@ -526,16 +526,32 @@ struct ContentView: View {
     }
 
     private func transcriptURL(for recording: RecordingInfo) -> URL? {
-        let base = recording.url.deletingPathExtension()
+        let fm = FileManager.default
+        let dir = recording.url.deletingLastPathComponent()
+        let stem = recording.url.deletingPathExtension().lastPathComponent
+        var newest: (url: URL, date: Date)?
         for format in OutputFormat.allCases {
-            let url = base.appendingPathExtension(format.rawValue)
-            if FileManager.default.fileExists(atPath: url.path) { return url }
+            let ext = format.rawValue
+            // Check base file, then -1, -2, ... until gap
+            var i = 0
+            while true {
+                let name = i == 0 ? "\(stem).\(ext)" : "\(stem)-\(i).\(ext)"
+                let url = dir.appendingPathComponent(name)
+                guard fm.fileExists(atPath: url.path) else { break }
+                if let mod = try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date,
+                   newest == nil || mod > newest!.date { newest = (url, mod) }
+                i += 1
+            }
         }
-        return nil
+        return newest?.url
     }
 
     private func transcriptExists(for recording: RecordingInfo) -> Bool {
-        transcriptURL(for: recording) != nil
+        let base = recording.url.deletingPathExtension()
+        for format in OutputFormat.allCases {
+            if FileManager.default.fileExists(atPath: base.appendingPathExtension(format.rawValue).path) { return true }
+        }
+        return false
     }
 
     private func copyTranscript(for recording: RecordingInfo) {
