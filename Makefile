@@ -8,8 +8,7 @@ SWIFTC = swiftc
 TEST_SOURCES = Tests/test_components.swift \
 	Sources/Ripcord/AudioConstants.swift \
 	Sources/Ripcord/CircularAudioBuffer.swift \
-	Sources/Ripcord/AudioFileWriter.swift \
-	Sources/Ripcord/TranscriptFormatter.swift
+	Sources/Ripcord/AudioFileWriter.swift
 
 .PHONY: build bundle bundle-unsigned install clean test test-e2e
 
@@ -42,7 +41,7 @@ install: bundle
 
 test:
 	mkdir -p $(BUILD_DIR)
-	$(SWIFTC) -O -target arm64-apple-macosx14.2 -framework AudioToolbox -framework AVFoundation -parse-as-library -o $(BUILD_DIR)/test_components Sources/Ripcord/AudioConstants.swift Sources/Ripcord/CircularAudioBuffer.swift Sources/Ripcord/AudioFileWriter.swift Sources/Ripcord/TranscriptFormatter.swift Tests/test_components.swift
+	$(SWIFTC) -O -target arm64-apple-macosx14.2 -framework AudioToolbox -framework AVFoundation -parse-as-library -o $(BUILD_DIR)/test_components Sources/Ripcord/AudioConstants.swift Sources/Ripcord/CircularAudioBuffer.swift Sources/Ripcord/AudioFileWriter.swift Tests/test_components.swift
 	$(BUILD_DIR)/test_components
 
 E2E_BUNDLE = $(BUILD_DIR)/RipcordE2ETest.app

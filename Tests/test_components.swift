@@ -770,68 +770,6 @@ func testMicWeakSignalStillVisible() {
     assert(hasSignal, "even quiet mic signal (0.02 peak) should produce non-zero merged bars")
 }
 
-// ═══════════════════════════════════════════════════════════════
-// Transcript formatting tests
-// ═══════════════════════════════════════════════════════════════
-
-func testTranscriptFormatting() {
-    // Two speakers alternating
-    let segments: [SpeakerSegment] = [
-        .init(speakerId: "A", startTime: 0.0, endTime: 3.0),
-        .init(speakerId: "B", startTime: 3.0, endTime: 5.0),
-        .init(speakerId: "A", startTime: 5.0, endTime: 8.0),
-    ]
-    let text = "Hello welcome to the meeting I have updates Great lets start"
-    let result = TranscriptFormatter.format(asrText: text, segments: segments)
-
-    // Should have Speaker 1 and Speaker 2 labels
-    assert(result.contains("Speaker 1:"), "should have Speaker 1 label, got: \(result)")
-    assert(result.contains("Speaker 2:"), "should have Speaker 2 label, got: \(result)")
-
-    // Should have paragraph breaks between speakers
-    let paragraphs = result.components(separatedBy: "\n\n")
-    assert(paragraphs.count == 3, "should have 3 paragraphs (A-B-A), got \(paragraphs.count)")
-
-    // First and third paragraphs should be Speaker 1
-    assert(paragraphs[0].hasPrefix("Speaker 1:"), "first paragraph should be Speaker 1")
-    assert(paragraphs[2].hasPrefix("Speaker 1:"), "third paragraph should be Speaker 1")
-    assert(paragraphs[1].hasPrefix("Speaker 2:"), "second paragraph should be Speaker 2")
-}
-
-func testSingleSpeakerFallback() {
-    // Only one speaker — should return plain text without labels
-    let segments: [SpeakerSegment] = [
-        .init(speakerId: "A", startTime: 0.0, endTime: 5.0),
-        .init(speakerId: "A", startTime: 5.0, endTime: 10.0),
-    ]
-    let text = "This is a monologue with only one person speaking."
-    let result = TranscriptFormatter.format(asrText: text, segments: segments)
-
-    assert(!result.contains("Speaker"), "single speaker: should not have speaker labels, got: \(result)")
-    assert(result == text, "single speaker: should return plain text, got: \(result)")
-}
-
-func testEmptySegmentsFallback() {
-    let text = "Hello world"
-    let result = TranscriptFormatter.format(asrText: text, segments: [])
-    assert(result == text, "empty segments: should return plain text, got: \(result)")
-}
-
-func testConsecutiveSameSpeakerMerge() {
-    // Consecutive segments from same speaker should merge into one paragraph
-    let segments: [SpeakerSegment] = [
-        .init(speakerId: "A", startTime: 0.0, endTime: 2.0),
-        .init(speakerId: "A", startTime: 2.0, endTime: 4.0),
-        .init(speakerId: "B", startTime: 4.0, endTime: 6.0),
-    ]
-    let text = "First part second part other speaker talks"
-    let result = TranscriptFormatter.format(asrText: text, segments: segments)
-
-    let paragraphs = result.components(separatedBy: "\n\n")
-    assert(paragraphs.count == 2, "consecutive same-speaker should merge: got \(paragraphs.count) paragraphs")
-    assert(paragraphs[0].hasPrefix("Speaker 1:"), "merged paragraph should be Speaker 1")
-    assert(paragraphs[1].hasPrefix("Speaker 2:"), "second paragraph should be Speaker 2")
-}
 
 // ═══════════════════════════════════════════════════════════════
 // Run all tests
@@ -893,12 +831,6 @@ struct TestRunner {
         testFilledBarCount()
         testMicSineWaveBarPeaks()
         testMicWeakSignalStillVisible()
-
-        print("Running transcript formatting tests...")
-        testTranscriptFormatting()
-        testSingleSpeakerFallback()
-        testEmptySegmentsFallback()
-        testConsecutiveSameSpeakerMerge()
 
         print("\n\(passed) passed, \(failed) failed")
         exit(failed > 0 ? 1 : 0)
