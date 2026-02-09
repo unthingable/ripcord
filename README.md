@@ -49,9 +49,45 @@ On first launch, macOS will prompt for:
 
 Launch Ripcord from the menubar. It immediately starts filling a circular buffer with system audio (and mic, if enabled).
 
+### Recording
+
 - **Drag the capture scrubber** to choose how much buffered audio to keep (30s up to the full buffer)
 - **Click Record** (or press Cmd+Shift+R) to save — the recording includes the selected buffer plus any new audio going forward
 - **Click Stop** to finish — the file is saved to the output directory
+
+The **waveform** shows live audio amplitude. During buffering, the highlighted region shows how much audio will be captured; during recording, the entire waveform turns red. The **level meters** on the right show system audio (blue) and microphone (green) levels.
+
+### Microphone
+
+Use the mic dropdown at the bottom of the panel to select an input device, or toggle the mic off entirely. System audio is always captured regardless of mic setting.
+
+### Settings
+
+Click the gear icon to open the settings panel.
+
+**Recording** — set the buffer duration (1–15 min), output format (WAV or M4A), and M4A quality (64–256 kbps). These are locked while recording.
+
+**Silence detection** — enable auto-pause to stop recording during silence. Configure the RMS threshold and how long silence must last before pausing.
+
+**Transcription** — download models (one-time), then configure defaults for auto-transcription:
+- Language model: Multilingual (v3) or English-only (v2)
+- Transcript format: txt, md, json, srt, vtt
+- Remove filler words (um, uh, etc.)
+- Speaker attribution (diarization) with sensitivity and expected speaker count
+
+Enable "Transcribe recordings" to automatically transcribe every new recording.
+
+**General** — choose the output directory and enable launch at login.
+
+### Transcription
+
+After recording, your files appear in **Recent recordings** at the bottom of the panel. From there you can:
+
+- **Transcribe** — click to open a config popover where you pick model, format, filler removal, and speaker settings, then transcribe
+- **Copy transcript** — copy the full transcript text to the clipboard
+- **Re-transcribe** — re-process a recording with different settings
+
+To transcribe an external audio file, click **Transcribe file** at the bottom-left of the panel.
 
 ### Transcribe CLI
 
