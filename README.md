@@ -16,30 +16,31 @@ macOS menubar app for retroactive audio recording with transcription.
 - **`transcribe` CLI** for batch transcription
 - **Global hotkey** — Cmd+Shift+R
 
-## Requirements
+## Install
+
+Download the latest `Ripcord.app` from [Releases](../../releases) and move it to your Applications folder.
+
+### Requirements
 
 - macOS 14.2+ (Sonoma)
 - Apple Silicon
-- Swift 6.0 toolchain (Command Line Tools)
-- Permissions: Screen & System Audio Recording, Microphone (prompted on first use)
 
-## Build & Install
+### Permissions
 
-```
-make bundle       # build + create Ripcord.app
-make install      # copy to ~/Applications
-./build.sh        # test + build + install + launch (all-in-one)
-```
+On first launch, macOS will prompt for:
 
-## Code Signing
+- **Screen & System Audio Recording** — required for capturing system audio
+- **Microphone** — required for mic input
 
-The `make bundle` target codesigns the app with a local identity named **"Ripcord Development"**. Creating this certificate avoids having to re-grant audio permissions after each rebuild.
+## Usage
 
-To create it: open **Keychain Access → Certificate Assistant → Create a Certificate**, name it `Ripcord Development`, set type to **Code Signing**.
+Launch Ripcord from the menubar. It immediately starts filling a circular buffer with system audio (and mic, if enabled).
 
-If you don't create the certificate, the build still works — the codesign step will just fail silently and you'll need to re-approve permissions each time.
+- **Drag the capture scrubber** to choose how much buffered audio to keep (30s up to the full buffer)
+- **Click Record** (or press Cmd+Shift+R) to save — the recording includes the selected buffer plus any new audio going forward
+- **Click Stop** to finish — the file is saved to the output directory
 
-## Transcribe CLI
+### Transcribe CLI
 
 Bundled inside `Ripcord.app/Contents/MacOS/transcribe`.
 
@@ -72,6 +73,23 @@ Example:
 transcribe recording.m4a --format md -o transcript.md --num-speakers 2
 ```
 
+## Build from Source
+
+Requires Swift 6.0 toolchain (Command Line Tools).
+
+```
+git clone https://github.com/unthingable/ripcord.git
+cd ripcord
+make install      # build, bundle Ripcord.app, copy to ~/Applications
+```
+
+### Testing
+
+```
+make test         # unit tests
+make test-e2e     # end-to-end (requires audio permissions)
+```
+
 ## Project Structure
 
 ```
@@ -83,11 +101,4 @@ Tests/
   test_components.swift          # unit tests
   test_e2e.swift                 # end-to-end (requires audio permissions)
   TranscribeKitTests/            # TranscribeKit unit tests
-```
-
-## Testing
-
-```
-make test         # unit tests
-make test-e2e     # end-to-end (requires audio permissions)
 ```

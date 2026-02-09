@@ -411,8 +411,9 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         // Update state and start elapsed timer (main thread, immediate)
-        waveformTimer?.invalidate()
-        waveformTimer = nil
+        // Reset waveform for fresh streaming display during recording
+        waveformAmplitudes = [Float](repeating: 0, count: 100)
+        filledBarCount = 0
         state = .recording
         recordingStartTime = Date()
         recordingElapsed = 0
@@ -823,21 +824,29 @@ final class RecordingManager: @unchecked Sendable {
         waveformTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self else { return }
 
-            // Waveform: merge system + mic bar peaks (whichever is louder)
-            let sysRaw = self.systemBuffer.getBarPeaks()
-            let micRaw = self.micBuffer.getBarPeaks()
-            var raw = [Float](repeating: 0, count: 100)
-            for i in 0..<100 {
-                raw[i] = max(sysRaw[i], micRaw[i])
-            }
-
-            self.waveformAmplitudes = raw
-            self.updateFilledBarCount()
-
             // Level meters: consume peaks tracked inline in audio callbacks
             let peaks = self.consumeMeterPeaks()
             self.systemLevel = max(self.systemLevel * 0.6, peaks.system)
             self.micLevel = max(self.micLevel * 0.6, peaks.mic)
+
+            if self.state == .recording {
+                // Streaming mode: shift bars left, append new bar from peak data
+                var amps = self.waveformAmplitudes
+                amps.removeFirst()
+                amps.append(max(peaks.system, peaks.mic))
+                self.waveformAmplitudes = amps
+                self.filledBarCount = min(100, self.filledBarCount + 1)
+            } else {
+                // Buffer mode: read from circular buffers
+                let sysRaw = self.systemBuffer.getBarPeaks()
+                let micRaw = self.micBuffer.getBarPeaks()
+                var raw = [Float](repeating: 0, count: 100)
+                for i in 0..<100 {
+                    raw[i] = max(sysRaw[i], micRaw[i])
+                }
+                self.waveformAmplitudes = raw
+                self.updateFilledBarCount()
+            }
         }
     }
 

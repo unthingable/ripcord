@@ -15,8 +15,8 @@ struct ContentView: View {
             // Status
             statusSection
 
-            // Capture duration scrubber with level meters (only while buffering)
-            if manager.state == .buffering {
+            // Capture duration scrubber with level meters (buffering + recording)
+            if manager.state == .buffering || manager.state == .recording {
                 captureSlider
                     .onAppear { manager.startWaveformTimer() }
                     .onDisappear { manager.stopWaveformTimer() }
@@ -32,9 +32,7 @@ struct ContentView: View {
             // Config summary
             configSummary
 
-            if manager.micEnabled {
-                micDeviceMenu
-            }
+            micRow
 
             // Recent recordings
             if !manager.recentRecordings.isEmpty {
@@ -119,7 +117,8 @@ struct ContentView: View {
                 .font(.headline)
             Spacer()
             Button(action: {
-                SettingsPanel.shared.open(manager: manager)
+                let anchor = NSApp.keyWindow
+                SettingsPanel.shared.open(manager: manager, anchorWindow: anchor)
             }) {
                 Image(systemName: "gearshape")
             }
@@ -168,15 +167,24 @@ struct ContentView: View {
 
     @ViewBuilder
     private var captureSlider: some View {
+        let isRecording = manager.state == .recording
+
         VStack(spacing: 4) {
             HStack {
-                Text("Capture: \(formatTime(manager.captureDurationSeconds))")
-                    .font(.caption)
-                    .foregroundStyle(.secondary)
+                if isRecording {
+                    Text("Recording")
+                        .font(.caption)
+                        .foregroundStyle(.red)
+                } else {
+                    Text("Capture: \(formatTime(manager.captureDurationSeconds))")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                    Spacer()
+                    Text("/ \(formatTime(manager.bufferDurationSeconds))")
+                        .font(.caption)
+                        .foregroundStyle(.tertiary)
+                }
                 Spacer()
-                Text("/ \(formatTime(manager.bufferDurationSeconds))")
-                    .font(.caption)
-                    .foregroundStyle(.tertiary)
             }
 
             HStack(spacing: 4) {
@@ -205,8 +213,13 @@ struct ContentView: View {
                             let amp = CGFloat(amps[100 - filledBars + i])
                             let barHeight = max(2, amp * size.height * 0.9)
 
-                            let isCaptured = x >= handleX
-                            let color: Color = isCaptured ? .accentColor : .primary.opacity(0.15)
+                            let color: Color
+                            if isRecording {
+                                color = .red
+                            } else {
+                                let isCaptured = x >= handleX
+                                color = isCaptured ? .accentColor : .primary.opacity(0.15)
+                            }
 
                             let rect = CGRect(
                                 x: x,
@@ -217,8 +230,8 @@ struct ContentView: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(color))
                         }
 
-                        // Handle line
-                        if handleX <= size.width {
+                        // Handle line (hidden during recording)
+                        if !isRecording, handleX <= size.width {
                             let handleRect = CGRect(x: handleX - 1, y: 0, width: 2, height: size.height)
                             context.fill(
                                 Path(roundedRect: handleRect, cornerRadius: 1),
@@ -226,6 +239,7 @@ struct ContentView: View {
                             )
                         }
                     }
+                    .allowsHitTesting(!isRecording)
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
@@ -318,16 +332,15 @@ struct ContentView: View {
     private var configSummary: some View {
         let bufferLabel = manager.bufferDurationSeconds / 60
         let formatLabel = manager.outputFormat.rawValue
-        let micLabel = manager.micEnabled ? "Mic on" : "Mic off"
-        Text("Buffer: \(bufferLabel) min  \u{2022}  \(formatLabel)  \u{2022}  \(micLabel)")
+        Text("Buffer: \(bufferLabel) min  \u{2022}  \(formatLabel)")
             .font(.caption)
             .foregroundStyle(.secondary)
     }
 
-    // MARK: - Mic Device Menu
+    // MARK: - Mic Row (toggle + device picker)
 
     @ViewBuilder
-    private var micDeviceMenu: some View {
+    private var micRow: some View {
         let devices = manager.deviceEnumerator.inputDevices
         let selectedUID = manager.selectedMicUID
         let selectedLabel: String = {
@@ -340,50 +353,64 @@ struct ContentView: View {
             return "System Default"
         }()
 
-        Menu {
-            Button {
-                Task { await manager.updateSelectedMic(nil) }
-            } label: {
-                if selectedUID == nil {
-                    Label("System Default", systemImage: "checkmark")
-                } else {
-                    Text("System Default")
-                }
-            }
-
-            Divider()
-
-            ForEach(devices) { device in
+        HStack(spacing: 6) {
+            Menu {
                 Button {
-                    Task { await manager.updateSelectedMic(device.uid) }
+                    Task { await manager.updateSelectedMic(nil) }
                 } label: {
-                    if selectedUID == device.uid {
-                        Label(device.name, systemImage: "checkmark")
+                    if selectedUID == nil {
+                        Label("System Default", systemImage: "checkmark")
                     } else {
-                        Text(device.name)
+                        Text("System Default")
                     }
                 }
-            }
 
-            // Show disconnected entry if saved UID is not in current list
-            if let uid = selectedUID,
-               !devices.contains(where: { $0.uid == uid }) {
                 Divider()
-                Button { } label: {
-                    Label("\(uid) (Disconnected)", systemImage: "checkmark")
+
+                ForEach(devices) { device in
+                    Button {
+                        Task { await manager.updateSelectedMic(device.uid) }
+                    } label: {
+                        if selectedUID == device.uid {
+                            Label(device.name, systemImage: "checkmark")
+                        } else {
+                            Text(device.name)
+                        }
+                    }
                 }
-                .disabled(true)
+
+                // Show disconnected entry if saved UID is not in current list
+                if let uid = selectedUID,
+                   !devices.contains(where: { $0.uid == uid }) {
+                    Divider()
+                    Button { } label: {
+                        Label("\(uid) (Disconnected)", systemImage: "checkmark")
+                    }
+                    .disabled(true)
+                }
+            } label: {
+                HStack {
+                    Label(selectedLabel, systemImage: "mic")
+                        .font(.caption)
+                        .lineLimit(1)
+                    Spacer()
+                }
             }
-        } label: {
-            HStack {
-                Label("Input: \(selectedLabel)", systemImage: "mic")
-                    .font(.caption)
-                    .lineLimit(1)
-                Spacer()
+            .menuStyle(.borderlessButton)
+            .fixedSize(horizontal: false, vertical: true)
+            .disabled(!manager.micEnabled)
+            .opacity(manager.micEnabled ? 1 : 0.4)
+
+            Toggle(isOn: Binding(
+                get: { manager.micEnabled },
+                set: { enabled in Task { await manager.setMicEnabled(enabled) } }
+            )) {
+                EmptyView()
             }
+            .toggleStyle(.switch)
+            .controlSize(.mini)
+            .labelsHidden()
         }
-        .menuStyle(.borderlessButton)
-        .fixedSize(horizontal: false, vertical: true)
     }
 
     // MARK: - Recent Recordings

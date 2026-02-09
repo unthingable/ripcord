@@ -24,15 +24,11 @@ bundle: build
 	cp $(BIN_PATH)/$(APP_NAME) $(BUNDLE)/Contents/MacOS/$(APP_NAME)
 	cp $(BIN_PATH)/transcribe $(BUNDLE)/Contents/MacOS/transcribe
 	cp Info.plist $(BUNDLE)/Contents/Info.plist
-	codesign --force --sign "Ripcord Development" --entitlements Ripcord.entitlements $(BUNDLE)
-
-bundle-unsigned: build
-	rm -rf $(BUNDLE)
-	mkdir -p $(BUNDLE)/Contents/MacOS
-	mkdir -p $(BUNDLE)/Contents/Resources
-	cp $(BIN_PATH)/$(APP_NAME) $(BUNDLE)/Contents/MacOS/$(APP_NAME)
-	cp $(BIN_PATH)/transcribe $(BUNDLE)/Contents/MacOS/transcribe
-	cp Info.plist $(BUNDLE)/Contents/Info.plist
+	@if codesign --force --sign "Ripcord Development" --entitlements Ripcord.entitlements $(BUNDLE) 2>/dev/null; then \
+		echo "Signed with 'Ripcord Development' identity"; \
+	else \
+		echo "WARNING: Code signing skipped ('Ripcord Development' certificate not found). You will need to re-grant audio permissions after each rebuild."; \
+	fi
 
 install: bundle
 	mkdir -p $(INSTALL_DIR)
