@@ -74,6 +74,7 @@ struct TranscribeCLI: AsyncParsableCommand {
         }
 
         let outputPath = output ?? deriveOutputPath(audioFile: audioFile, format: outputFormat)
+        log("Output: \(outputPath)")
 
         // Validate ranges
         if let s = sensitivity, s <= 0.0 || s > 1.0 {
@@ -166,7 +167,9 @@ struct TranscribeCLI: AsyncParsableCommand {
         }
         try formatted.write(toFile: finalOutputPath, atomically: true, encoding: .utf8)
 
-        log("Output: \(finalOutputPath)")
+        if finalOutputPath != outputPath {
+            log("Output (renamed): \(finalOutputPath)")
+        }
         transcriber.cleanup()
     }
 }
