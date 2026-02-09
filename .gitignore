@@ -1,0 +1,11 @@
+.build/
+.DS_Store
+*.app/
+ripcord.zip
+.claude/
+Package.resolved
+*.wav
+*.mp3
+*.m4a
+*.flac
+local/

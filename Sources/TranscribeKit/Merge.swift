@@ -1,0 +1,348 @@
+import FluidAudio
+import Foundation
+
+// MARK: - Filler Words
+
+/// Unambiguous single-word fillers to strip when removeFillerWords is enabled.
+public let fillerWords: Set<String> = [
+    "um", "uh", "umm", "uhh", "hmm", "hm", "er", "ah", "erm", "eh", "mm",
+]
+
+/// Returns true if the word (after lowercasing and stripping punctuation) is a filler.
+public func isFillerWord(_ word: String) -> Bool {
+    let stripped = word.lowercased().trimmingCharacters(
+        in: .punctuationCharacters.union(.symbols))
+    return fillerWords.contains(stripped)
+}
+
+// MARK: - Token → Word Merging
+
+/// Merge subword token timings into word-level timings.
+///
+/// Tokens starting with whitespace indicate word boundaries (SentencePiece convention).
+public func mergeTokensIntoWords(_ tokenTimings: [TokenTiming]) -> [WordTiming] {
+    guard !tokenTimings.isEmpty else { return [] }
+
+    var words: [WordTiming] = []
+    var currentWord = ""
+    var currentStart: TimeInterval?
+    var currentEnd: TimeInterval = 0
+    var confidences: [Float] = []
+
+    for timing in tokenTimings {
+        let token = timing.token
+
+        if token.hasPrefix(" ") || token.hasPrefix("\n") || token.hasPrefix("\t") {
+            if !currentWord.isEmpty, let start = currentStart {
+                let avgConf = confidences.isEmpty
+                    ? Float(0) : confidences.reduce(0, +) / Float(confidences.count)
+                words.append(WordTiming(
+                    word: currentWord, startTime: start,
+                    endTime: currentEnd, confidence: avgConf))
+            }
+            currentWord = token.trimmingCharacters(in: .whitespacesAndNewlines)
+            currentStart = timing.startTime
+            currentEnd = timing.endTime
+            confidences = [timing.confidence]
+        } else {
+            if currentStart == nil {
+                currentStart = timing.startTime
+            }
+            currentWord += token
+            currentEnd = timing.endTime
+            confidences.append(timing.confidence)
+        }
+    }
+
+    if !currentWord.isEmpty, let start = currentStart {
+        let avgConf = confidences.isEmpty
+            ? Float(0) : confidences.reduce(0, +) / Float(confidences.count)
+        words.append(WordTiming(
+            word: currentWord, startTime: start,
+            endTime: currentEnd, confidence: avgConf))
+    }
+
+    return words
+}
+
+// MARK: - Overlap-Based Speaker Matching
+
+/// Find the speaker for a word by computing overlap with diarization segments.
+/// Falls back to nearest segment within 2s if there is no overlap.
+public func findSpeakerByOverlap(
+    wordStart: Double, wordEnd: Double,
+    in segments: [TimedSpeakerSegment]
+) -> String? {
+    // Compute overlap per speaker
+    var speakerOverlap: [String: Double] = [:]
+    for seg in segments {
+        let segStart = Double(seg.startTimeSeconds)
+        let segEnd = Double(seg.endTimeSeconds)
+        let overlapStart = max(wordStart, segStart)
+        let overlapEnd = min(wordEnd, segEnd)
+        let overlap = overlapEnd - overlapStart
+        if overlap > 0 {
+            speakerOverlap[seg.speakerId, default: 0] += overlap
+        }
+    }
+
+    // Pick speaker with greatest total overlap
+    if let best = speakerOverlap.max(by: { $0.value < $1.value }) {
+        return best.key
+    }
+
+    // Fallback: nearest segment within 2s
+    let wordMid = (wordStart + wordEnd) / 2
+    var bestSpeaker: String?
+    var bestDistance = Double.infinity
+    for seg in segments {
+        let segStart = Double(seg.startTimeSeconds)
+        let segEnd = Double(seg.endTimeSeconds)
+        let distance: Double
+        if wordMid < segStart {
+            distance = segStart - wordMid
+        } else if wordMid > segEnd {
+            distance = wordMid - segEnd
+        } else {
+            distance = 0
+        }
+        if distance < bestDistance {
+            bestDistance = distance
+            bestSpeaker = seg.speakerId
+        }
+    }
+    return bestDistance <= 2.0 ? bestSpeaker : nil
+}
+
+// MARK: - Speaker Smoothing
+
+public struct SpeakerWord {
+    public let word: WordTiming
+    public var speaker: String?
+
+    public init(word: WordTiming, speaker: String?) {
+        self.word = word
+        self.speaker = speaker
+    }
+}
+
+/// Pass 1: Absorb nil-speaker words into the nearest non-nil neighbor by temporal distance.
+public func absorbNilSpeakers(_ words: inout [SpeakerWord]) {
+    for i in words.indices where words[i].speaker == nil {
+        var bestSpeaker: String?
+        var bestDistance = Double.infinity
+
+        // Look backward
+        for j in stride(from: i - 1, through: 0, by: -1) {
+            if let sp = words[j].speaker {
+                let dist = words[i].word.startTime - words[j].word.endTime
+                if dist < bestDistance {
+                    bestDistance = dist
+                    bestSpeaker = sp
+                }
+                break
+            }
+        }
+
+        // Look forward
+        for j in (i + 1)..<words.count {
+            if let sp = words[j].speaker {
+                let dist = words[j].word.startTime - words[i].word.endTime
+                if dist < bestDistance {
+                    bestDistance = dist
+                    bestSpeaker = sp
+                }
+                break
+            }
+        }
+
+        words[i].speaker = bestSpeaker
+    }
+}
+
+/// Pass 2: Iteratively merge the shortest speaker run (by time) into its longer neighbor until
+/// all runs meet the minimum duration threshold.
+///
+/// Each pass finds the shortest run by `endTime - startTime`. If it's under `threshold` seconds,
+/// it merges into the longer adjacent neighbor (or only neighbor for edge runs). Repeats until
+/// no run is under the threshold or no merge is possible.
+public func smoothSpeakerRuns(_ words: inout [SpeakerWord], threshold: Double = 1.5) {
+    guard words.count >= 2 else { return }
+
+    while true {
+        // Build runs: [(startIdx, count, speaker)]
+        var runs: [(start: Int, count: Int, speaker: String?)] = []
+        var runStart = 0
+        for i in 1..<words.count {
+            if words[i].speaker != words[runStart].speaker {
+                runs.append((runStart, i - runStart, words[runStart].speaker))
+                runStart = i
+            }
+        }
+        runs.append((runStart, words.count - runStart, words[runStart].speaker))
+
+        guard runs.count >= 2 else { break }
+
+        // Find the shortest run by time duration
+        var shortestIdx = -1
+        var shortestDuration = Double.infinity
+        for ri in runs.indices {
+            let run = runs[ri]
+            let startTime = words[run.start].word.startTime
+            let endTime = words[run.start + run.count - 1].word.endTime
+            let duration = endTime - startTime
+            if duration < shortestDuration {
+                shortestDuration = duration
+                shortestIdx = ri
+            }
+        }
+
+        guard shortestIdx >= 0, shortestDuration < threshold else { break }
+
+        // Determine which neighbor to merge into (the longer one)
+        let run = runs[shortestIdx]
+        let neighborIdx: Int
+        if shortestIdx == 0 {
+            neighborIdx = 1
+        } else if shortestIdx == runs.count - 1 {
+            neighborIdx = runs.count - 2
+        } else {
+            let prevRun = runs[shortestIdx - 1]
+            let nextRun = runs[shortestIdx + 1]
+            let prevDuration = words[prevRun.start + prevRun.count - 1].word.endTime - words[prevRun.start].word.startTime
+            let nextDuration = words[nextRun.start + nextRun.count - 1].word.endTime - words[nextRun.start].word.startTime
+            neighborIdx = prevDuration >= nextDuration ? shortestIdx - 1 : shortestIdx + 1
+        }
+
+        // Merge: assign the neighbor's speaker to all words in the short run
+        let neighborSpeaker = runs[neighborIdx].speaker
+        for wi in run.start..<(run.start + run.count) {
+            words[wi].speaker = neighborSpeaker
+        }
+    }
+}
+
+// MARK: - Public Merge API
+
+/// Merge ASR result with optional diarization into transcript segments.
+public func mergeResults(
+    asrResult: ASRResult,
+    diarizationResult: DiarizationResult?,
+    removeFillerWords: Bool = false
+) -> [TranscriptSegment] {
+    guard let tokenTimings = asrResult.tokenTimings, !tokenTimings.isEmpty else {
+        return [TranscriptSegment(
+            start: 0, end: asrResult.duration,
+            text: asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            speaker: nil)]
+    }
+
+    var words = mergeTokensIntoWords(tokenTimings)
+    guard !words.isEmpty else {
+        return [TranscriptSegment(
+            start: 0, end: asrResult.duration,
+            text: asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines),
+            speaker: nil)]
+    }
+
+    // Filter filler words before speaker assignment
+    if removeFillerWords {
+        words = words.filter { !isFillerWord($0.word) }
+        guard !words.isEmpty else {
+            return [TranscriptSegment(start: 0, end: asrResult.duration, text: "", speaker: nil)]
+        }
+    }
+
+    if let diarization = diarizationResult {
+        return mergeWithDiarization(words: words, diarization: diarization)
+    }
+    return segmentWithoutDiarization(words: words)
+}
+
+/// Group words into segments by speaker continuity, using overlap-based matching and debouncing.
+private func mergeWithDiarization(
+    words: [WordTiming],
+    diarization: DiarizationResult
+) -> [TranscriptSegment] {
+    let diarizationSegments = diarization.segments
+
+    // Step 1: Overlap-based speaker assignment
+    var speakerWords = words.map { word in
+        SpeakerWord(
+            word: word,
+            speaker: findSpeakerByOverlap(
+                wordStart: word.startTime, wordEnd: word.endTime,
+                in: diarizationSegments))
+    }
+
+    // Step 2: Absorb nil-speaker words into nearest neighbor
+    absorbNilSpeakers(&speakerWords)
+
+    // Step 3: Smooth short false speaker switches
+    smoothSpeakerRuns(&speakerWords)
+
+    // Step 4: Group into segments by speaker continuity
+    var segments: [TranscriptSegment] = []
+    var currentSpeaker: String? = speakerWords.first?.speaker
+    var currentWords: [WordTiming] = []
+
+    for sw in speakerWords {
+        if sw.speaker != currentSpeaker {
+            if !currentWords.isEmpty {
+                segments.append(TranscriptSegment(
+                    start: currentWords.first!.startTime,
+                    end: currentWords.last!.endTime,
+                    text: currentWords.map(\.word).joined(separator: " "),
+                    speaker: currentSpeaker))
+            }
+            currentSpeaker = sw.speaker
+            currentWords = [sw.word]
+        } else {
+            currentWords.append(sw.word)
+        }
+    }
+
+    if !currentWords.isEmpty {
+        segments.append(TranscriptSegment(
+            start: currentWords.first!.startTime,
+            end: currentWords.last!.endTime,
+            text: currentWords.map(\.word).joined(separator: " "),
+            speaker: currentSpeaker))
+    }
+
+    return segments
+}
+
+/// Group words into segments at sentence boundaries or pauses.
+private func segmentWithoutDiarization(words: [WordTiming]) -> [TranscriptSegment] {
+    var segments: [TranscriptSegment] = []
+    var currentWords: [WordTiming] = []
+    let sentenceEnders: Set<Character> = [".", "!", "?"]
+
+    for word in words {
+        currentWords.append(word)
+
+        let isSentenceEnd = word.word.last.map { sentenceEnders.contains($0) } ?? false
+        let isPause = currentWords.count > 1
+            && (word.startTime - currentWords[currentWords.count - 2].endTime) > 1.0
+
+        if isSentenceEnd || isPause {
+            segments.append(TranscriptSegment(
+                start: currentWords.first!.startTime,
+                end: currentWords.last!.endTime,
+                text: currentWords.map(\.word).joined(separator: " "),
+                speaker: nil))
+            currentWords = []
+        }
+    }
+
+    if !currentWords.isEmpty {
+        segments.append(TranscriptSegment(
+            start: currentWords.first!.startTime,
+            end: currentWords.last!.endTime,
+            text: currentWords.map(\.word).joined(separator: " "),
+            speaker: nil))
+    }
+
+    return segments
+}
