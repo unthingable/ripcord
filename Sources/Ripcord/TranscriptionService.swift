@@ -28,8 +28,7 @@ final class TranscriptionService: @unchecked Sendable {
         await MainActor.run { state = fromCache ? .loadingModels : .downloadingModels(0) }
 
         do {
-            let version: ModelVersion = config.asrModelVersion == .v2 ? .v2 : .v3
-            try await transcriber.prepareModels(version: version) { [weak self] progress in
+            try await transcriber.prepareModels(version: config.asrModelVersion) { [weak self] progress in
                 if !fromCache {
                     Task { @MainActor in
                         self?.state = .downloadingModels(progress)
@@ -54,8 +53,7 @@ final class TranscriptionService: @unchecked Sendable {
 
     /// Check whether model files exist on disk (no download, no loading).
     static func modelsExistOnDisk(config: TranscriptionConfig) -> Bool {
-        let version: ModelVersion = config.asrModelVersion == .v2 ? .v2 : .v3
-        return Transcriber.modelsExistOnDisk(version: version)
+        return Transcriber.modelsExistOnDisk(version: config.asrModelVersion)
     }
 
     // MARK: - Transcription Pipeline

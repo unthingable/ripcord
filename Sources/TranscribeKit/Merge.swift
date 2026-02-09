@@ -181,7 +181,7 @@ public func snapTransitionsToPauses(
             // Stop if we leave the new speaker's run
             guard words[j].speaker == newSpeaker else { break }
             // Stop if we'd exceed caps
-            guard (j - i) < maxWords, accumulated < maxDuration else { break }
+            guard (j - i) <= maxWords, accumulated < maxDuration else { break }
 
             let gap = words[j].word.startTime - words[j - 1].word.endTime
             if gap >= pauseThreshold {

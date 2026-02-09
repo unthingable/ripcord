@@ -32,6 +32,7 @@ final class MicrophoneCapture: @unchecked Sendable {
             stateLock.unlock()
             return
         }
+        _isRunning = true
         stateLock.unlock()
 
         currentDeviceID = deviceID
@@ -126,12 +127,16 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
         }
 
-        engine.prepare()
-        try engine.start()
-
-        stateLock.lock()
-        _isRunning = true
-        stateLock.unlock()
+        do {
+            engine.prepare()
+            try engine.start()
+        } catch {
+            engine.inputNode.removeTap(onBus: 0)
+            stateLock.lock()
+            _isRunning = false
+            stateLock.unlock()
+            throw error
+        }
     }
 
     func stop() {

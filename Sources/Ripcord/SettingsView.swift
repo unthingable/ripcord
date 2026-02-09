@@ -176,73 +176,31 @@ struct SettingsView: View {
                 set: { manager.updateTranscriptionEnabled($0) }
             ))
 
-            Picker("Language Model", selection: Binding(
-                get: { manager.transcriptionConfig.asrModelVersion },
-                set: { version in
-                    var config = manager.transcriptionConfig
-                    config.asrModelVersion = version
-                    manager.updateTranscriptionConfig(config)
-                }
-            )) {
-                Text("Multilingual (v3)").tag(AsrModelVersion.v3)
-                Text("English (v2)").tag(AsrModelVersion.v2)
+            Picker("Language Model", selection: manager.transcriptionConfigBinding(\.asrModelVersion)) {
+                Text("Multilingual (v3)").tag(ModelVersion.v3)
+                Text("English (v2)").tag(ModelVersion.v2)
             }
             .pickerStyle(.segmented)
 
-            Picker("Transcript Format", selection: Binding(
-                get: { manager.transcriptionConfig.transcriptFormat },
-                set: { format in
-                    var config = manager.transcriptionConfig
-                    config.transcriptFormat = format
-                    manager.updateTranscriptionConfig(config)
-                }
-            )) {
+            Picker("Transcript Format", selection: manager.transcriptionConfigBinding(\.transcriptFormat)) {
                 ForEach(OutputFormat.allCases, id: \.self) { format in
                     Text(format.rawValue.uppercased()).tag(format)
                 }
             }
             .pickerStyle(.segmented)
 
-            Toggle("Remove filler words", isOn: Binding(
-                get: { manager.transcriptionConfig.removeFillerWords },
-                set: { enabled in
-                    var config = manager.transcriptionConfig
-                    config.removeFillerWords = enabled
-                    manager.updateTranscriptionConfig(config)
-                }
-            ))
+            Toggle("Remove filler words", isOn: manager.transcriptionConfigBinding(\.removeFillerWords))
 
-            Toggle("Speaker attribution", isOn: Binding(
-                get: { manager.transcriptionConfig.diarizationEnabled },
-                set: { enabled in
-                    var config = manager.transcriptionConfig
-                    config.diarizationEnabled = enabled
-                    manager.updateTranscriptionConfig(config)
-                }
-            ))
+            Toggle("Speaker attribution", isOn: manager.transcriptionConfigBinding(\.diarizationEnabled))
 
-            Picker("Speaker sensitivity", selection: Binding(
-                get: { manager.transcriptionConfig.speakerSensitivity },
-                set: { sens in
-                    var config = manager.transcriptionConfig
-                    config.speakerSensitivity = sens
-                    manager.updateTranscriptionConfig(config)
-                }
-            )) {
+            Picker("Speaker sensitivity", selection: manager.transcriptionConfigBinding(\.speakerSensitivity)) {
                 Text("Low").tag(SpeakerSensitivity.low)
                 Text("Medium").tag(SpeakerSensitivity.medium)
                 Text("High").tag(SpeakerSensitivity.high)
             }
             .disabled(!manager.transcriptionConfig.diarizationEnabled)
 
-            Picker("Expected speakers", selection: Binding(
-                get: { manager.transcriptionConfig.expectedSpeakerCount },
-                set: { count in
-                    var config = manager.transcriptionConfig
-                    config.expectedSpeakerCount = count
-                    manager.updateTranscriptionConfig(config)
-                }
-            )) {
+            Picker("Expected speakers", selection: manager.transcriptionConfigBinding(\.expectedSpeakerCount)) {
                 Text("Auto").tag(-1)
                 Text("2").tag(2)
                 Text("3").tag(3)

@@ -2,6 +2,7 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import Observation
+import SwiftUI
 import TranscribeKit
 
 enum AppState: Equatable {
@@ -40,11 +41,6 @@ enum SettingsKey {
     static let removeFillerWords = "ripcord.removeFillerWords"
 }
 
-enum AsrModelVersion: String, CaseIterable {
-    case v2
-    case v3
-}
-
 enum SpeakerSensitivity: String, CaseIterable {
     case low, medium, high
 
@@ -59,7 +55,7 @@ enum SpeakerSensitivity: String, CaseIterable {
 }
 
 struct TranscriptionConfig: Equatable {
-    var asrModelVersion: AsrModelVersion = .v3
+    var asrModelVersion: ModelVersion = .v3
     var diarizationEnabled: Bool = true
     var speakerSensitivity: SpeakerSensitivity = .medium
     var expectedSpeakerCount: Int = -1  // -1 = auto
@@ -202,7 +198,7 @@ final class RecordingManager: @unchecked Sendable {
 
         // Load transcription config
         if let asrStr = defaults.string(forKey: SettingsKey.asrModelVersion),
-           let asr = AsrModelVersion(rawValue: asrStr) {
+           let asr = ModelVersion(rawValue: asrStr) {
             transcriptionConfig.asrModelVersion = asr
         }
         if defaults.object(forKey: SettingsKey.diarizationEnabled) != nil {
@@ -567,6 +563,18 @@ final class RecordingManager: @unchecked Sendable {
     func updateSilenceTimeout(_ value: Double) {
         silenceTimeoutSeconds = value
         UserDefaults.standard.set(value, forKey: SettingsKey.silenceTimeoutSeconds)
+    }
+
+    func transcriptionConfigBinding<T>(_ keyPath: WritableKeyPath<TranscriptionConfig, T>) -> Binding<T> {
+        nonisolated(unsafe) let kp = keyPath
+        return Binding(
+            get: { self.transcriptionConfig[keyPath: kp] },
+            set: { value in
+                var config = self.transcriptionConfig
+                config[keyPath: kp] = value
+                self.updateTranscriptionConfig(config)
+            }
+        )
     }
 
     func downloadTranscriptionModels() {

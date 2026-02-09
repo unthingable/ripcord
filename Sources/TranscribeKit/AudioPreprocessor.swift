@@ -90,7 +90,7 @@ public enum AudioPreprocessor {
             let abs = Swift.abs(monoSamples[i])
             if abs > peak { peak = abs }
         }
-        if peak > 0 && peak < 0.95 {
+        if peak > 0.01 && peak < 0.95 {
             let gain = 1.0 / peak
             for i in 0..<sampleCount {
                 monoSamples[i] *= gain

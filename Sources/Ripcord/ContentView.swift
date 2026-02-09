@@ -117,8 +117,7 @@ struct ContentView: View {
                 .font(.headline)
             Spacer()
             Button(action: {
-                let anchor = NSApp.keyWindow
-                SettingsPanel.shared.open(manager: manager, anchorWindow: anchor)
+                SettingsPanel.open(manager: manager)
             }) {
                 Image(systemName: "gearshape")
             }
@@ -482,20 +481,6 @@ struct ContentView: View {
                         }
                         .buttonStyle(.plain)
                         .help("Re-transcribe")
-                        .popover(isPresented: Binding(
-                            get: { transcribeTarget?.url == recording.url },
-                            set: { if !$0 { transcribeTarget = nil } }
-                        ), arrowEdge: .trailing) {
-                            TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
-                                let target = transcribeTarget
-                                transcribeTarget = nil
-                                if let target {
-                                    manager.transcribeRecording(target, config: pendingTranscriptionConfig)
-                                }
-                            } onCancel: {
-                                transcribeTarget = nil
-                            }
-                        }
                     }
                 } else if manager.transcriptionService.modelsReady {
                     Button(action: {
@@ -506,20 +491,20 @@ struct ContentView: View {
                             .font(.caption)
                     }
                     .buttonStyle(.plain)
-                    .popover(isPresented: Binding(
-                        get: { transcribeTarget?.url == recording.url },
-                        set: { if !$0 { transcribeTarget = nil } }
-                    ), arrowEdge: .trailing) {
-                        TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
-                            let target = transcribeTarget
-                            transcribeTarget = nil
-                            if let target {
-                                manager.transcribeRecording(target, config: pendingTranscriptionConfig)
-                            }
-                        } onCancel: {
-                            transcribeTarget = nil
-                        }
+                }
+            }
+            .popover(isPresented: Binding(
+                get: { transcribeTarget?.url == recording.url },
+                set: { if !$0 { transcribeTarget = nil } }
+            ), arrowEdge: .trailing) {
+                TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
+                    let target = transcribeTarget
+                    transcribeTarget = nil
+                    if let target {
+                        manager.transcribeRecording(target, config: pendingTranscriptionConfig)
                     }
+                } onCancel: {
+                    transcribeTarget = nil
                 }
             }
         }
@@ -563,7 +548,12 @@ struct ContentView: View {
 
     // MARK: - Global Hotkey
 
+    private static var hotkeyInstalled = false
+
     private func setupGlobalHotkey() {
+        guard !Self.hotkeyInstalled else { return }
+        Self.hotkeyInstalled = true
+
         let mgr = manager
 
         let isHotkey: (NSEvent) -> Bool = { event in
@@ -603,8 +593,8 @@ struct TranscriptionConfigForm: View {
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
             Picker("Model", selection: $config.asrModelVersion) {
-                Text("Multilingual (v3)").tag(AsrModelVersion.v3)
-                Text("English (v2)").tag(AsrModelVersion.v2)
+                Text("Multilingual (v3)").tag(ModelVersion.v3)
+                Text("English (v2)").tag(ModelVersion.v2)
             }
             .controlSize(.small)
 

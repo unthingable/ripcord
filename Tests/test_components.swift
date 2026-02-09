@@ -318,12 +318,6 @@ func testInterleaveOneEmpty() {
 // Write-through verification tests
 // ═══════════════════════════════════════════════════════════════
 
-/// Generates a mono sine wave at a given frequency.
-func monoSineWave(seconds: Double, sampleRate: Int = 48000, frequency: Double = 440) -> [Float] {
-    let count = Int(seconds * Double(sampleRate))
-    return (0..<count).map { Float(sin(Double($0) * 2 * .pi * frequency / Double(sampleRate))) }
-}
-
 /// Counts zero-crossings in a signal (used for rough frequency estimation).
 func zeroCrossings(_ samples: [Float]) -> Int {
     guard samples.count > 1 else { return 0 }
@@ -346,8 +340,8 @@ func testWriteThroughVerification() {
     let freqR = 2000.0  // 2kHz on right
 
     // Generate stereo: 1kHz L, 2kHz R
-    let leftChannel = monoSineWave(seconds: durationSec, sampleRate: sampleRate, frequency: freqL)
-    let rightChannel = monoSineWave(seconds: durationSec, sampleRate: sampleRate, frequency: freqR)
+    let leftChannel = sineWave(seconds: durationSec, sampleRate: sampleRate, frequency: freqL)
+    let rightChannel = sineWave(seconds: durationSec, sampleRate: sampleRate, frequency: freqR)
     let frames = leftChannel.count
     var stereoData = [Float](repeating: 0, count: frames * 2)
     for i in 0..<frames {

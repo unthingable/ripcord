@@ -6,6 +6,7 @@ macOS menubar app for retroactive audio recording with transcription.
 
 - **Retroactive circular buffer** — 1–15 min configurable; save audio that already happened
 - **System audio + microphone** capture with live mixing
+- **Live waveform + level meters** — real-time visualization during buffering and recording
 - **Capture duration scrubber** — drag to select how much of the buffer to keep
 - **Mic device selection** — choose input device from the menubar
 - **WAV and M4A output** with configurable quality
@@ -13,12 +14,24 @@ macOS menubar app for retroactive audio recording with transcription.
 - **Built-in transcription** with speaker diarization (via [FluidAudio](https://github.com/FluidInference/FluidAudio))
 - **Transcript formats** — txt, md, json, srt, vtt
 - **Filler word removal** — strip um, uh, etc. from transcripts
+- **Re-transcribe** — re-process recordings with different settings
+- **Transcribe external files** — import and transcribe any audio file
+- **Recent recordings** — quick access with copy-transcript and re-transcribe actions
 - **`transcribe` CLI** for batch transcription
 - **Global hotkey** — Cmd+Shift+R
+- **Launch at login** — optional auto-start with macOS
 
 ## Install
 
 Download the latest `Ripcord.app` from [Releases](../../releases) and move it to your Applications folder.
+
+**Note:** The app is unsigned. On first launch, macOS will show a warning that it's from an unidentified developer. To bypass this:
+
+```bash
+xattr -cr /path/to/Ripcord.app
+```
+
+Or right-click the app, select "Open", then click "Open" in the dialog.
 
 ### Requirements
 
@@ -86,8 +99,9 @@ make install      # build, bundle Ripcord.app, copy to ~/Applications
 ### Testing
 
 ```
-make test         # unit tests
-make test-e2e     # end-to-end (requires audio permissions)
+make test                    # unit tests (buffer, writer, interleave)
+make test-e2e                # end-to-end (requires audio permissions)
+swift run TranscribeKitTests # merge pipeline tests
 ```
 
 ## Project Structure

@@ -3,8 +3,8 @@ import FluidAudio
 import Foundation
 
 public final class Transcriber: @unchecked Sendable {
+    private let lock = NSLock()
     private var asrManager: AsrManager?
-    private var loadedVersion: ModelVersion?
 
     public init() {}
 
@@ -43,12 +43,11 @@ public final class Transcriber: @unchecked Sendable {
 
         progress(1.0)
 
-        self.asrManager = asr
-        self.loadedVersion = version
+        lock.withLock { self.asrManager = asr }
     }
 
     public var isReady: Bool {
-        asrManager != nil
+        lock.withLock { asrManager != nil }
     }
 
     // MARK: - Transcription
@@ -59,7 +58,7 @@ public final class Transcriber: @unchecked Sendable {
         startTime: Double? = nil,
         endTime: Double? = nil
     ) async throws -> TranscriptionResult {
-        guard let asr = asrManager else {
+        guard let asr = lock.withLock({ asrManager }) else {
             throw TranscriberError.modelsNotReady
         }
 
@@ -88,18 +87,12 @@ public final class Transcriber: @unchecked Sendable {
                 diarizerConfig = diarizerConfig.withSpeakers(min: min, max: max)
             }
 
-            if let threshold = config.clusteringThreshold {
-                diarizerConfig.clustering.threshold = threshold
-            }
+            // FluidAudio defaults to clustering threshold 0.6, which is too
+            // conservative and fragments speakers. Match pyannote's optimized ~0.7.
+            diarizerConfig.clustering.threshold = config.clusteringThreshold ?? 0.75
             if let t = config.speechThreshold {
                 diarizerConfig.segmentation.speechOnsetThreshold = t
                 diarizerConfig.segmentation.speechOffsetThreshold = t
-            }
-
-            // FluidAudio defaults to clustering threshold 0.6, which is too
-            // conservative and fragments speakers. Match pyannote's optimized ~0.7.
-            if config.clusteringThreshold == nil {
-                diarizerConfig.clustering.threshold = 0.75
             }
 
             switch config.quality {
@@ -112,13 +105,7 @@ public final class Transcriber: @unchecked Sendable {
             // FluidAudio defaults to 1.0s minimum segment duration, which discards
             // brief but real speaker turns at boundaries, shifting them by up to ~1s.
             // Use a much lower threshold to preserve boundary precision.
-            if config.minSegmentDuration == nil {
-                diarizerConfig.embedding.minSegmentDurationSeconds = 0.1
-            }
-
-            if let d = config.minSegmentDuration {
-                diarizerConfig.embedding.minSegmentDurationSeconds = d
-            }
+            diarizerConfig.embedding.minSegmentDurationSeconds = config.minSegmentDuration ?? 0.1
             if let g = config.minGapDuration {
                 diarizerConfig.postProcessing.minGapDurationSeconds = g
             }
@@ -155,9 +142,12 @@ public final class Transcriber: @unchecked Sendable {
     }
 
     public func cleanup() {
-        asrManager?.cleanup()
-        asrManager = nil
-        loadedVersion = nil
+        let asr = lock.withLock { () -> AsrManager? in
+            let a = asrManager
+            asrManager = nil
+            return a
+        }
+        asr?.cleanup()
     }
 
     // MARK: - Errors

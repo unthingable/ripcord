@@ -18,10 +18,11 @@ private func formatTimestampSRT(_ seconds: Double) -> String {
 }
 
 private func formatTimestampVTT(_ seconds: Double) -> String {
-    let m = Int(seconds / 60)
+    let h = Int(seconds / 3600)
+    let m = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
     let s = Int(seconds.truncatingRemainder(dividingBy: 60))
     let ms = Int((seconds - Double(Int(seconds))) * 1000)
-    return String(format: "%02d:%02d.%03d", m, s, ms)
+    return String(format: "%02d:%02d:%02d.%03d", h, m, s, ms)
 }
 
 public func formatDuration(_ seconds: Double) -> String {
@@ -34,6 +35,43 @@ public func formatDuration(_ seconds: Double) -> String {
         return String(format: "%dh %02dm %02ds", h, rm, s)
     }
     return String(format: "%dm %02ds", m, s)
+}
+
+// MARK: - Speaker Grouping
+
+private struct SpeakerGroup {
+    let speaker: String?
+    let start: Double
+    let text: String
+}
+
+private func groupBySpeaker(_ segments: [TranscriptSegment]) -> [SpeakerGroup] {
+    var groups: [SpeakerGroup] = []
+    var currentSpeaker: String?
+    var currentTexts: [String] = []
+    var currentStart: Double?
+
+    for seg in segments {
+        if seg.speaker != currentSpeaker {
+            if !currentTexts.isEmpty {
+                groups.append(SpeakerGroup(
+                    speaker: currentSpeaker, start: currentStart ?? 0,
+                    text: currentTexts.joined(separator: " ")))
+            }
+            currentSpeaker = seg.speaker
+            currentTexts = []
+            currentStart = seg.start
+        }
+        currentTexts.append(seg.text)
+    }
+
+    if !currentTexts.isEmpty {
+        groups.append(SpeakerGroup(
+            speaker: currentSpeaker, start: currentStart ?? 0,
+            text: currentTexts.joined(separator: " ")))
+    }
+
+    return groups
 }
 
 // MARK: - Format dispatch
@@ -59,29 +97,10 @@ private func formatTxt(segments: [TranscriptSegment], metadata: TranscriptMetada
     let hasSpeakers = segments.contains { $0.speaker != nil }
 
     if hasSpeakers {
-        var currentSpeaker: String?
-        var currentTexts: [String] = []
-        var currentStart: Double?
-
-        for seg in segments {
-            if seg.speaker != currentSpeaker {
-                if !currentTexts.isEmpty {
-                    let ts = formatTimestamp(currentStart ?? 0)
-                    lines.append("[\(ts)] \(currentSpeaker ?? "Unknown"):")
-                    lines.append("  \(currentTexts.joined(separator: " "))")
-                    lines.append("")
-                }
-                currentSpeaker = seg.speaker
-                currentTexts = []
-                currentStart = seg.start
-            }
-            currentTexts.append(seg.text)
-        }
-
-        if !currentTexts.isEmpty {
-            let ts = formatTimestamp(currentStart ?? 0)
-            lines.append("[\(ts)] \(currentSpeaker ?? "Unknown"):")
-            lines.append("  \(currentTexts.joined(separator: " "))")
+        for group in groupBySpeaker(segments) {
+            let ts = formatTimestamp(group.start)
+            lines.append("[\(ts)] \(group.speaker ?? "Unknown"):")
+            lines.append("  \(group.text)")
             lines.append("")
         }
     } else {
@@ -110,31 +129,11 @@ private func formatMd(segments: [TranscriptSegment], metadata: TranscriptMetadat
     let hasSpeakers = segments.contains { $0.speaker != nil }
 
     if hasSpeakers {
-        var currentSpeaker: String?
-        var currentTexts: [String] = []
-        var currentStart: Double?
-
-        for seg in segments {
-            if seg.speaker != currentSpeaker {
-                if !currentTexts.isEmpty {
-                    let ts = formatTimestamp(currentStart ?? 0)
-                    lines.append("**\(currentSpeaker ?? "Unknown")** \u{2014} \(ts)")
-                    lines.append("")
-                    lines.append(currentTexts.joined(separator: " "))
-                    lines.append("")
-                }
-                currentSpeaker = seg.speaker
-                currentTexts = []
-                currentStart = seg.start
-            }
-            currentTexts.append(seg.text)
-        }
-
-        if !currentTexts.isEmpty {
-            let ts = formatTimestamp(currentStart ?? 0)
-            lines.append("**\(currentSpeaker ?? "Unknown")** \u{2014} \(ts)")
+        for group in groupBySpeaker(segments) {
+            let ts = formatTimestamp(group.start)
+            lines.append("**\(group.speaker ?? "Unknown")** \u{2014} \(ts)")
             lines.append("")
-            lines.append(currentTexts.joined(separator: " "))
+            lines.append(group.text)
             lines.append("")
         }
     } else {
