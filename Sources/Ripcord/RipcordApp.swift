@@ -11,6 +11,10 @@ struct RipcordApp: App {
             Label("Ripcord", systemImage: menubarIconName)
         }
         .menuBarExtraStyle(.window)
+
+        Settings {
+            SettingsView(manager: manager)
+        }
     }
 
     private var menubarIconName: String {

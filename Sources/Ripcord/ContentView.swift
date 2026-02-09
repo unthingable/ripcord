@@ -7,6 +7,7 @@ struct ContentView: View {
 
     @State private var transcribeTarget: RecordingInfo?
     @State private var pendingTranscriptionConfig = TranscriptionConfig()
+    @Environment(\.openSettings) private var openSettings
     @State private var showFileTranscribePopover = false
     @State private var fileTranscribeURL: URL?
 
@@ -117,7 +118,8 @@ struct ContentView: View {
                 .font(.headline)
             Spacer()
             Button(action: {
-                SettingsPanel.open(manager: manager)
+                NSApp.activate()
+                openSettings()
             }) {
                 Image(systemName: "gearshape")
             }

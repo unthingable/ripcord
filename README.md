@@ -2,6 +2,10 @@
 
 macOS menubar app for retroactive audio recording with transcription.
 
+<p align="center">
+  <img src="assets/app.png" width="240" alt="Ripcord menubar panel">
+</p>
+
 ## Features
 
 - **Retroactive circular buffer** — 1–15 min configurable; save audio that already happened
