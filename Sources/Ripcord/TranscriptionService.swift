@@ -79,8 +79,12 @@ final class TranscriptionService: @unchecked Sendable {
                     speakerCount = .auto
                 }
                 diarization = DiarizationConfig(
+                    quality: config.diarizationQuality,
                     clusteringThreshold: Double(config.speakerSensitivity.clusteringThreshold),
                     speakerCount: speakerCount,
+                    speechThreshold: Float(config.speechThreshold),
+                    minSegmentDuration: config.minSegmentDuration,
+                    minGapDuration: config.minGapDuration,
                     removeFillerWords: config.removeFillerWords
                 )
             } else {

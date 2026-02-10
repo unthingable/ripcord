@@ -39,6 +39,10 @@ enum SettingsKey {
     static let silenceTimeoutSeconds = "ripcord.silenceTimeoutSeconds"
     static let transcriptFormat = "ripcord.transcriptFormat"
     static let removeFillerWords = "ripcord.removeFillerWords"
+    static let diarizationQuality = "ripcord.diarizationQuality"
+    static let speechThreshold = "ripcord.speechThreshold"
+    static let minSegmentDuration = "ripcord.minSegmentDuration"
+    static let minGapDuration = "ripcord.minGapDuration"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -61,6 +65,10 @@ struct TranscriptionConfig: Equatable {
     var expectedSpeakerCount: Int = -1  // -1 = auto
     var transcriptFormat: OutputFormat = .txt
     var removeFillerWords: Bool = false
+    var diarizationQuality: DiarizationQuality = .balanced
+    var speechThreshold: Double = 0.5
+    var minSegmentDuration: Double = 0.1
+    var minGapDuration: Double = 0.0
 }
 
 @Observable
@@ -218,6 +226,19 @@ final class RecordingManager: @unchecked Sendable {
         }
         if defaults.object(forKey: SettingsKey.removeFillerWords) != nil {
             transcriptionConfig.removeFillerWords = defaults.bool(forKey: SettingsKey.removeFillerWords)
+        }
+        if let qualStr = defaults.string(forKey: SettingsKey.diarizationQuality),
+           let qual = DiarizationQuality(rawValue: qualStr) {
+            transcriptionConfig.diarizationQuality = qual
+        }
+        if defaults.object(forKey: SettingsKey.speechThreshold) != nil {
+            transcriptionConfig.speechThreshold = defaults.double(forKey: SettingsKey.speechThreshold)
+        }
+        if defaults.object(forKey: SettingsKey.minSegmentDuration) != nil {
+            transcriptionConfig.minSegmentDuration = defaults.double(forKey: SettingsKey.minSegmentDuration)
+        }
+        if defaults.object(forKey: SettingsKey.minGapDuration) != nil {
+            transcriptionConfig.minGapDuration = defaults.double(forKey: SettingsKey.minGapDuration)
         }
     }
 
@@ -592,6 +613,10 @@ final class RecordingManager: @unchecked Sendable {
         defaults.set(config.expectedSpeakerCount, forKey: SettingsKey.expectedSpeakerCount)
         defaults.set(config.transcriptFormat.rawValue, forKey: SettingsKey.transcriptFormat)
         defaults.set(config.removeFillerWords, forKey: SettingsKey.removeFillerWords)
+        defaults.set(config.diarizationQuality.rawValue, forKey: SettingsKey.diarizationQuality)
+        defaults.set(config.speechThreshold, forKey: SettingsKey.speechThreshold)
+        defaults.set(config.minSegmentDuration, forKey: SettingsKey.minSegmentDuration)
+        defaults.set(config.minGapDuration, forKey: SettingsKey.minGapDuration)
 
         // Re-prepare models if ASR version changed
         if transcriptionService.modelsReady

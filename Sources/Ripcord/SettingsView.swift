@@ -193,6 +193,13 @@ struct SettingsView: View {
 
             Toggle("Speaker attribution", isOn: manager.transcriptionConfigBinding(\.diarizationEnabled))
 
+            Picker("Quality", selection: manager.transcriptionConfigBinding(\.diarizationQuality)) {
+                Text("Fast").tag(DiarizationQuality.fast)
+                Text("Balanced").tag(DiarizationQuality.balanced)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!manager.transcriptionConfig.diarizationEnabled)
+
             Picker("Speaker sensitivity", selection: manager.transcriptionConfigBinding(\.speakerSensitivity)) {
                 Text("Low").tag(SpeakerSensitivity.low)
                 Text("Medium").tag(SpeakerSensitivity.medium)
@@ -202,10 +209,48 @@ struct SettingsView: View {
 
             Picker("Expected speakers", selection: manager.transcriptionConfigBinding(\.expectedSpeakerCount)) {
                 Text("Auto").tag(-1)
-                Text("2").tag(2)
-                Text("3").tag(3)
-                Text("4").tag(4)
-                Text("5+").tag(5)
+                ForEach(2...10, id: \.self) { n in
+                    Text("\(n)").tag(n)
+                }
+            }
+            .disabled(!manager.transcriptionConfig.diarizationEnabled)
+
+            DisclosureGroup("Advanced") {
+                HStack {
+                    Text("Speech threshold")
+                    DefaultMarkSlider(
+                        value: manager.transcriptionConfigBinding(\.speechThreshold),
+                        range: 0.1...0.9, step: 0.05, defaultValue: 0.5
+                    )
+                    Text(String(format: "%.2f", manager.transcriptionConfig.speechThreshold))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .frame(width: 34)
+                }
+
+                HStack {
+                    Text("Min segment")
+                    DefaultMarkSlider(
+                        value: manager.transcriptionConfigBinding(\.minSegmentDuration),
+                        range: 0.05...2.0, step: 0.05, defaultValue: 1.0
+                    )
+                    Text(String(format: "%.2fs", manager.transcriptionConfig.minSegmentDuration))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .frame(width: 40)
+                }
+
+                HStack {
+                    Text("Min gap")
+                    DefaultMarkSlider(
+                        value: manager.transcriptionConfigBinding(\.minGapDuration),
+                        range: 0.0...1.0, step: 0.05, defaultValue: 0.1
+                    )
+                    Text(String(format: "%.2fs", manager.transcriptionConfig.minGapDuration))
+                        .font(.caption)
+                        .monospacedDigit()
+                        .frame(width: 40)
+                }
             }
             .disabled(!manager.transcriptionConfig.diarizationEnabled)
         }

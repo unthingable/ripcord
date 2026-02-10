@@ -584,6 +584,33 @@ struct ContentView: View {
     }
 }
 
+// MARK: - Default-Mark Slider
+
+/// A slider with a small tick mark indicating a reference default value.
+struct DefaultMarkSlider: View {
+    @Binding var value: Double
+    let range: ClosedRange<Double>
+    let step: Double
+    let defaultValue: Double
+
+    var body: some View {
+        Slider(value: $value, in: range, step: step)
+            .overlay {
+                GeometryReader { geo in
+                    let pad: CGFloat = 10
+                    let track = geo.size.width - pad * 2
+                    let frac = (defaultValue - range.lowerBound) / (range.upperBound - range.lowerBound)
+                    let x = pad + frac * track
+                    Rectangle()
+                        .fill(.secondary.opacity(0.45))
+                        .frame(width: 1.5, height: 8)
+                        .position(x: x, y: geo.size.height - 2)
+                        .allowsHitTesting(false)
+                }
+            }
+    }
+}
+
 // MARK: - Transcription Config Form & Popover
 
 struct TranscriptionConfigForm: View {
@@ -611,6 +638,12 @@ struct TranscriptionConfigForm: View {
                 .controlSize(.small)
 
             if config.diarizationEnabled {
+                Picker("Quality", selection: $config.diarizationQuality) {
+                    Text("Fast").tag(DiarizationQuality.fast)
+                    Text("Balanced").tag(DiarizationQuality.balanced)
+                }
+                .controlSize(.small)
+
                 Picker("Sensitivity", selection: $config.speakerSensitivity) {
                     Text("Low").tag(SpeakerSensitivity.low)
                     Text("Medium").tag(SpeakerSensitivity.medium)
@@ -620,10 +653,39 @@ struct TranscriptionConfigForm: View {
 
                 Picker("Speakers", selection: $config.expectedSpeakerCount) {
                     Text("Auto").tag(-1)
-                    Text("2").tag(2)
-                    Text("3").tag(3)
-                    Text("4").tag(4)
-                    Text("5+").tag(5)
+                    ForEach(2...10, id: \.self) { n in
+                        Text("\(n)").tag(n)
+                    }
+                }
+                .controlSize(.small)
+
+                DisclosureGroup("Advanced") {
+                    HStack {
+                        Text("Speech threshold")
+                        DefaultMarkSlider(value: $config.speechThreshold, range: 0.1...0.9, step: 0.05, defaultValue: 0.5)
+                        Text(String(format: "%.2f", config.speechThreshold))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .frame(width: 34)
+                    }
+
+                    HStack {
+                        Text("Min segment")
+                        DefaultMarkSlider(value: $config.minSegmentDuration, range: 0.05...2.0, step: 0.05, defaultValue: 1.0)
+                        Text(String(format: "%.2fs", config.minSegmentDuration))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .frame(width: 40)
+                    }
+
+                    HStack {
+                        Text("Min gap")
+                        DefaultMarkSlider(value: $config.minGapDuration, range: 0.0...1.0, step: 0.05, defaultValue: 0.1)
+                        Text(String(format: "%.2fs", config.minGapDuration))
+                            .font(.caption2)
+                            .monospacedDigit()
+                            .frame(width: 40)
+                    }
                 }
                 .controlSize(.small)
             }
