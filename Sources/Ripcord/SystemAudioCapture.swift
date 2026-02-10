@@ -11,9 +11,6 @@ final class SystemAudioCapture: @unchecked Sendable {
     private var ioProcID: AudioDeviceIOProcID?
     private var tapFormat: AudioStreamBasicDescription?
 
-    private var deviceChangeListenerBlock: AudioObjectPropertyListenerBlock?
-    private var restartTask: Task<Void, Never>?
-
     // Resampling state (lazy-initialized if tap sample rate differs from target)
     private var converter: AudioConverterRef?
 
@@ -108,12 +105,9 @@ final class SystemAudioCapture: @unchecked Sendable {
             throw CaptureError.deviceStartFailed(err)
         }
 
-        installDeviceChangeListener()
     }
 
     func stop() {
-        removeDeviceChangeListener()
-
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
             _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
             _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
@@ -134,53 +128,6 @@ final class SystemAudioCapture: @unchecked Sendable {
             AudioConverterDispose(converter)
             self.converter = nil
         }
-    }
-
-    // MARK: - Device Change Listener
-
-    private func installDeviceChangeListener() {
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-            mScope: kAudioObjectPropertyScopeGlobal,
-            mElement: kAudioObjectPropertyElementMain
-        )
-        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
-            guard let self else { return }
-            // Cancel any pending restart to debounce rapid notifications
-            self.restartTask?.cancel()
-            self.restartTask = Task { @MainActor [weak self] in
-                // Debounce: wait 0.5s since macOS can fire multiple change
-                // notifications rapidly during a device switch
-                try? await Task.sleep(for: .milliseconds(500))
-                guard !Task.isCancelled, let self else { return }
-                self.stop()
-                do {
-                    try await self.start()
-                } catch {
-                    // Device may not be ready yet; nothing we can do here
-                }
-            }
-        }
-        deviceChangeListenerBlock = block
-        AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
-        )
-    }
-
-    private func removeDeviceChangeListener() {
-        if let block = deviceChangeListenerBlock {
-            var address = AudioObjectPropertyAddress(
-                mSelector: kAudioHardwarePropertyDefaultOutputDevice,
-                mScope: kAudioObjectPropertyScopeGlobal,
-                mElement: kAudioObjectPropertyElementMain
-            )
-            AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
-            )
-            deviceChangeListenerBlock = nil
-        }
-        restartTask?.cancel()
-        restartTask = nil
     }
 
     // MARK: - I/O Block Handler
