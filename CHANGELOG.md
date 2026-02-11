@@ -1,5 +1,9 @@
 # Changelog
 
+## Unreleased
+
+- Persist recording waveform across popover close/reopen
+
 ## 0.3.0
 
 - Start audio capture at app launch instead of waiting for first panel click

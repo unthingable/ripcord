@@ -129,6 +129,16 @@ final class RecordingManager: @unchecked Sendable {
     private var silenceSampleCount: Int = 0
     private var silenceDetected: Bool = false
 
+    // Recording waveform ring buffer — only accessed on writeQueue.
+    // Tracks peak amplitude per 150ms bar so the waveform survives popover close/reopen.
+    private static let recordingBarCount = 100
+    private static let recordingBarSamplesPerBar = AudioConstants.sampleRateInt // 48000 samples = 1 second per bar
+    private var recordingBarPeaks = [Float](repeating: 0, count: 100)
+    private var recordingBarHead: Int = 0
+    private var recordingBarFilled: Int = 0
+    private var recordingBarCurrentPeak: Float = 0
+    private var recordingBarSampleCount: Int = 0
+
     /// Max samples one source can accumulate without the other before we assume the other is off.
     /// 500ms at 48kHz = 24000 samples.
     private static let remainderCap = 24000
@@ -406,6 +416,40 @@ final class RecordingManager: @unchecked Sendable {
             self.silenceSampleThreshold = Int(silenceTimeout * Double(AudioConstants.sampleRateInt))
             self.silenceSampleCount = 0
             self.silenceDetected = false
+
+            // Initialize recording waveform ring buffer, seeded from the retroactive buffer.
+            // Compute bar peaks from the drained audio so the waveform shows history immediately.
+            self.recordingBarPeaks = [Float](repeating: 0, count: Self.recordingBarCount)
+            self.recordingBarHead = 0
+            self.recordingBarFilled = 0
+            self.recordingBarCurrentPeak = 0
+            self.recordingBarSampleCount = 0
+            let spb = Self.recordingBarSamplesPerBar
+            let retroSamples = max(systemSamples.count, micSamples.count)
+            if retroSamples > 0 {
+                // Walk through the retroactive buffer in bar-sized chunks, taking max(sys, mic) peak per bar
+                let barCount = min(Self.recordingBarCount, (retroSamples + spb - 1) / spb)
+                // Start from the end so the most recent audio fills the rightmost bars
+                let startSample = retroSamples - barCount * spb
+                for bar in 0..<barCount {
+                    var peak: Float = 0
+                    let offset = max(0, startSample + bar * spb)
+                    let end = min(retroSamples, offset + spb)
+                    for i in offset..<end {
+                        if i < systemSamples.count {
+                            let a = abs(systemSamples[i])
+                            if a > peak { peak = a }
+                        }
+                        if i < micSamples.count {
+                            let a = abs(micSamples[i])
+                            if a > peak { peak = a }
+                        }
+                    }
+                    self.recordingBarPeaks[bar] = peak
+                }
+                self.recordingBarHead = barCount % Self.recordingBarCount
+                self.recordingBarFilled = barCount
+            }
 
             // Write the retroactive buffer (use max() — full buffer, no next cycle)
             let stereoBuffered = Self.interleave(systemSamples, micSamples)
@@ -762,6 +806,30 @@ final class RecordingManager: @unchecked Sendable {
         systemRemainder = []
         micRemainder = []
 
+        // Recording waveform: accumulate peak amplitude into the ring buffer.
+        // Runs before silence detection so bar peaks reflect all audio (including silent periods as low bars).
+        let flushSampleCount = max(sys.count, mic.count)
+        if flushSampleCount > 0 {
+            var flushPeak: Float = 0
+            for s in sys {
+                let a = abs(s)
+                if a > flushPeak { flushPeak = a }
+            }
+            for s in mic {
+                let a = abs(s)
+                if a > flushPeak { flushPeak = a }
+            }
+            if flushPeak > recordingBarCurrentPeak { recordingBarCurrentPeak = flushPeak }
+            recordingBarSampleCount += flushSampleCount
+            while recordingBarSampleCount >= Self.recordingBarSamplesPerBar {
+                recordingBarPeaks[recordingBarHead] = recordingBarCurrentPeak
+                recordingBarHead = (recordingBarHead + 1) % Self.recordingBarCount
+                if recordingBarFilled < Self.recordingBarCount { recordingBarFilled += 1 }
+                recordingBarCurrentPeak = 0
+                recordingBarSampleCount -= Self.recordingBarSamplesPerBar
+            }
+        }
+
         // Silence detection: measure peak amplitude across both sources
         if silenceEnabled {
             var peak: Float = 0
@@ -839,6 +907,33 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
+    /// Returns a snapshot of the recording waveform ring buffer as (bars, filledCount).
+    /// The returned array has `recordingBarCount` elements in chronological order (oldest first),
+    /// right-aligned so the newest bar is at the last index.
+    /// Must be called from a context that can block briefly (dispatches sync to writeQueue).
+    private func snapshotRecordingBars() -> ([Float], Int) {
+        var bars = [Float](repeating: 0, count: Self.recordingBarCount)
+        var filled = 0
+        writeQueue.sync {
+            filled = self.recordingBarFilled
+            let committed = min(filled, Self.recordingBarCount)
+            let hasPartial = self.recordingBarSampleCount > 0
+            // Total bars = committed + partial (if any), capped to the display size
+            let total = min(committed + (hasPartial ? 1 : 0), Self.recordingBarCount)
+            // How many committed bars fit (partial takes the last slot if present)
+            let committedSlots = hasPartial ? total - 1 : total
+            let readStart = (self.recordingBarHead - committedSlots + Self.recordingBarCount) % Self.recordingBarCount
+            let destOffset = Self.recordingBarCount - total
+            for i in 0..<committedSlots {
+                bars[destOffset + i] = self.recordingBarPeaks[(readStart + i) % Self.recordingBarCount]
+            }
+            if hasPartial {
+                bars[Self.recordingBarCount - 1] = self.recordingBarCurrentPeak
+            }
+        }
+        return (bars, min(filled + 1, Self.recordingBarCount))
+    }
+
     private func consumeMeterPeaks() -> (system: Float, mic: Float) {
         meterLock.lock()
         let sys = systemPeakAccum
@@ -851,8 +946,16 @@ final class RecordingManager: @unchecked Sendable {
 
     func startWaveformTimer() {
         waveformTimer?.invalidate()
-        waveformAmplitudes = [Float](repeating: 0, count: 100)
-        filledBarCount = 1
+
+        // Seed waveform from existing data instead of starting blank
+        if state == .recording {
+            let (bars, filled) = snapshotRecordingBars()
+            waveformAmplitudes = bars
+            filledBarCount = filled
+        } else {
+            waveformAmplitudes = [Float](repeating: 0, count: 100)
+            filledBarCount = 1
+        }
 
         waveformTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
             guard let self else { return }
@@ -863,12 +966,10 @@ final class RecordingManager: @unchecked Sendable {
             self.micLevel = max(self.micLevel * 0.6, peaks.mic)
 
             if self.state == .recording {
-                // Streaming mode: shift bars left, append new bar from peak data
-                var amps = self.waveformAmplitudes
-                amps.removeFirst()
-                amps.append(max(peaks.system, peaks.mic))
-                self.waveformAmplitudes = amps
-                self.filledBarCount = min(100, self.filledBarCount + 1)
+                // Read waveform from the recording ring buffer (survives popover close/reopen)
+                let (bars, filled) = self.snapshotRecordingBars()
+                self.waveformAmplitudes = bars
+                self.filledBarCount = filled
             } else {
                 // Buffer mode: read from circular buffers
                 let sysRaw = self.systemBuffer.getBarPeaks()
