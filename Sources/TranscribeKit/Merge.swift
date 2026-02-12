@@ -375,36 +375,137 @@ private func mergeWithDiarization(
     // Step 4: Smooth short false speaker switches
     smoothSpeakerRuns(&speakerWords)
 
-    // Step 5: Group into segments by speaker continuity
-    var segments: [TranscriptSegment] = []
-    var currentSpeaker: String? = speakerWords.first?.speaker
-    var currentWords: [WordTiming] = []
+    // Step 5: Sentence-aware segment grouping
+    return groupBySentenceAndSpeaker(speakerWords)
+}
 
-    for sw in speakerWords {
-        if sw.speaker != currentSpeaker {
-            if !currentWords.isEmpty {
-                segments.append(TranscriptSegment(
-                    start: currentWords.first!.startTime,
-                    end: currentWords.last!.endTime,
-                    text: currentWords.map(\.word).joined(separator: " "),
-                    speaker: currentSpeaker))
-            }
-            currentSpeaker = sw.speaker
-            currentWords = [sw.word]
+// MARK: - Sentence-Aware Grouping
+
+private let sentenceEnders: Set<Character> = [".", "!", "?"]
+
+/// Maximum segment duration (seconds) before force-emitting, even without a sentence boundary.
+/// Prevents runaway segments when ASR produces no punctuation (common in non-English).
+private let maxSegmentDuration: Double = 30.0
+
+/// Group speaker-assigned words into segments aligned to sentence boundaries.
+///
+/// Instead of splitting at every speaker change (which fragments sentences mid-phrase),
+/// this accumulates words and only emits a segment when a sentence boundary (punctuation
+/// or significant pause) coincides with a speaker change. If a speaker change occurs
+/// mid-sentence, the trailing words are kept in the current segment and the segment is
+/// attributed to whichever speaker covers the most duration.
+///
+/// A safety cap (`maxSegmentDuration`) force-emits at the last speaker-change point
+/// within the accumulator to prevent unbounded segments when punctuation is absent.
+public func groupBySentenceAndSpeaker(_ speakerWords: [SpeakerWord]) -> [TranscriptSegment] {
+    guard !speakerWords.isEmpty else { return [] }
+
+    var segments: [TranscriptSegment] = []
+    // Accumulator: (word, speaker) pairs for the current segment
+    var accum: [SpeakerWord] = []
+    // Index within accum of the last speaker change (used for force-emit split point)
+    var lastSpeakerChangeIdx: Int? = nil
+
+    for (i, sw) in speakerWords.enumerated() {
+        accum.append(sw)
+
+        // Track where speaker changes happen within the accumulator
+        if accum.count >= 2 && accum[accum.count - 1].speaker != accum[accum.count - 2].speaker {
+            lastSpeakerChangeIdx = accum.count - 1
+        }
+
+        // Detect sentence boundary: punctuation or significant pause to next word
+        let isSentenceEnd = sw.word.word.last.map { sentenceEnders.contains($0) } ?? false
+        let isPause: Bool
+        if i + 1 < speakerWords.count {
+            isPause = (speakerWords[i + 1].word.startTime - sw.word.endTime) > 1.0
         } else {
-            currentWords.append(sw.word)
+            isPause = false
+        }
+        let isBoundary = isSentenceEnd || isPause
+
+        // Check if the next word has a different speaker
+        let speakerChangesNext: Bool
+        if i + 1 < speakerWords.count {
+            speakerChangesNext = speakerWords[i + 1].speaker != sw.speaker
+        } else {
+            speakerChangesNext = false
+        }
+
+        // Emit when we hit a sentence boundary and the next word is a different speaker
+        if isBoundary && speakerChangesNext {
+            segments.append(emitSegment(from: accum))
+            accum = []
+            lastSpeakerChangeIdx = nil
+            continue
+        }
+
+        // Lookahead: if boundary but no immediate speaker change, check if one is imminent.
+        // Diarizer boundaries often lag 1-3 words behind real turn-taking points.
+        // Only trigger when there's a small gap (>0.15s) to avoid splitting mid-phrase
+        // punctuation like "Mr. Smith".
+        if isBoundary && !speakerChangesNext && i + 1 < speakerWords.count {
+            let gap = speakerWords[i + 1].word.startTime - sw.word.endTime
+            if gap > 0.15 {
+                let lookahead = min(i + 4, speakerWords.count) // up to 3 words ahead
+                var imminentChange = false
+                for j in (i + 1)..<lookahead {
+                    if speakerWords[j].speaker != sw.speaker {
+                        imminentChange = true
+                        break
+                    }
+                }
+                if imminentChange {
+                    segments.append(emitSegment(from: accum))
+                    accum = []
+                    lastSpeakerChangeIdx = nil
+                    continue
+                }
+            }
+        }
+
+        // Safety cap: force-emit if the segment has grown too long
+        let duration = sw.word.endTime - accum.first!.word.startTime
+        if duration >= maxSegmentDuration, let splitIdx = lastSpeakerChangeIdx, splitIdx > 0 {
+            // Emit everything before the last speaker change
+            let before = Array(accum.prefix(splitIdx))
+            segments.append(emitSegment(from: before))
+            accum = Array(accum.suffix(from: splitIdx))
+            // Recalculate lastSpeakerChangeIdx for the remaining accumulator
+            lastSpeakerChangeIdx = nil
+            for j in 1..<accum.count {
+                if accum[j].speaker != accum[j - 1].speaker {
+                    lastSpeakerChangeIdx = j
+                }
+            }
         }
     }
 
-    if !currentWords.isEmpty {
-        segments.append(TranscriptSegment(
-            start: currentWords.first!.startTime,
-            end: currentWords.last!.endTime,
-            text: currentWords.map(\.word).joined(separator: " "),
-            speaker: currentSpeaker))
+    // Emit any remaining words
+    if !accum.isEmpty {
+        segments.append(emitSegment(from: accum))
     }
 
     return segments
+}
+
+/// Build a TranscriptSegment from accumulated speaker-words, attributing the segment
+/// to whichever speaker covers the most total duration.
+private func emitSegment(from words: [SpeakerWord]) -> TranscriptSegment {
+    let start = words.first!.word.startTime
+    let end = words.last!.word.endTime
+    let text = words.map(\.word.word).joined(separator: " ")
+
+    // Majority speaker by duration
+    var speakerDuration: [String: Double] = [:]
+    for sw in words {
+        if let speaker = sw.speaker {
+            speakerDuration[speaker, default: 0] += sw.word.endTime - sw.word.startTime
+        }
+    }
+    let speaker = speakerDuration.max(by: { $0.value < $1.value })?.key
+
+    return TranscriptSegment(start: start, end: end, text: text, speaker: speaker)
 }
 
 /// Group words into segments at sentence boundaries or pauses.
