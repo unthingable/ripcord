@@ -606,6 +606,109 @@ test("Lookahead does not trigger on mid-phrase punctuation without gap") {
     assertEqual(segments.count, 1, "no split on mid-phrase punctuation without gap")
 }
 
+print("\nHeal split sentences:")
+
+test("Basic heal: incomplete sentence + completing word reassigned") {
+    // "a useful" (A) + "exercise. You know..." (B) → "exercise." reassigned to A
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("a", start: 0, end: 0.2), speaker: "A"),
+        SpeakerWord(word: makeWord("useful", start: 0.25, end: 0.6), speaker: "A"),
+        // 0.05s gap — continuous speech
+        SpeakerWord(word: makeWord("exercise.", start: 0.65, end: 1.0), speaker: "B"),
+        SpeakerWord(word: makeWord("You", start: 1.1, end: 1.3), speaker: "B"),
+        SpeakerWord(word: makeWord("know,", start: 1.35, end: 1.6), speaker: "B"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[2].speaker, "A", "exercise. should heal back to A")
+    assertEqual(words[3].speaker, "B", "You should stay with B")
+    assertEqual(words[4].speaker, "B", "know should stay with B")
+}
+
+test("Heals despite inflated word timings at speaker boundary") {
+    // ASR produces inflated durations for first word after speaker transition
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("actual", start: 0, end: 0.3), speaker: "A"),
+        SpeakerWord(word: makeWord("administrative", start: 0.35, end: 0.8), speaker: "A"),
+        // "reports." has inflated timing (2.0s duration) — typical ASR boundary artifact
+        SpeakerWord(word: makeWord("reports.", start: 1.6, end: 3.6), speaker: "B"),
+        SpeakerWord(word: makeWord("Or", start: 3.7, end: 3.9), speaker: "B"),
+        SpeakerWord(word: makeWord("like", start: 4.0, end: 4.2), speaker: "B"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[2].speaker, "A", "reports. should heal to A despite inflated timing")
+    assertEqual(words[3].speaker, "B", "Or should stay with B")
+}
+
+test("Cap at first punctuation: only first punctuated word healed") {
+    // "the" (A) + "big. red. house." (B) → only "big." reassigned
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("the", start: 0, end: 0.2), speaker: "A"),
+        SpeakerWord(word: makeWord("big.", start: 0.25, end: 0.4), speaker: "B"),
+        SpeakerWord(word: makeWord("red.", start: 0.45, end: 0.6), speaker: "B"),
+        SpeakerWord(word: makeWord("house.", start: 0.65, end: 0.8), speaker: "B"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[1].speaker, "A", "big. should heal to A")
+    assertEqual(words[2].speaker, "B", "red. should stay with B")
+    assertEqual(words[3].speaker, "B", "house. should stay with B")
+}
+
+test("Previous sentence already complete: no heal") {
+    // "okay." (A) + "right." (B) → no reassignment (A already ends with punctuation)
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("okay.", start: 0, end: 0.3), speaker: "A"),
+        SpeakerWord(word: makeWord("right.", start: 0.35, end: 0.6), speaker: "B"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[1].speaker, "B", "right. should stay with B (prev sentence complete)")
+}
+
+test("Backchannel guard: skip when next word returns to previous speaker") {
+    // "so it's a useful" (A) + "right." (B) + "concept" (A) → no heal (backchannel)
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("so", start: 0, end: 0.15), speaker: "A"),
+        SpeakerWord(word: makeWord("it's", start: 0.2, end: 0.35), speaker: "A"),
+        SpeakerWord(word: makeWord("a", start: 0.4, end: 0.5), speaker: "A"),
+        SpeakerWord(word: makeWord("useful", start: 0.55, end: 0.8), speaker: "A"),
+        // 0.05s gap
+        SpeakerWord(word: makeWord("right.", start: 0.85, end: 1.0), speaker: "B"),
+        // Returns to A — backchannel
+        SpeakerWord(word: makeWord("concept", start: 1.1, end: 1.4), speaker: "A"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[4].speaker, "B", "right. should stay with B (backchannel guard)")
+}
+
+test("Multi-word heal: two completing words reassigned") {
+    // "a useful" (A) + "exercise complete." (B) → both reassigned to A
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("a", start: 0, end: 0.2), speaker: "A"),
+        SpeakerWord(word: makeWord("useful", start: 0.25, end: 0.5), speaker: "A"),
+        SpeakerWord(word: makeWord("exercise", start: 0.55, end: 0.8), speaker: "B"),
+        SpeakerWord(word: makeWord("complete.", start: 0.85, end: 1.1), speaker: "B"),
+        SpeakerWord(word: makeWord("Now", start: 1.2, end: 1.4), speaker: "B"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[2].speaker, "A", "exercise should heal to A")
+    assertEqual(words[3].speaker, "A", "complete. should heal to A")
+    assertEqual(words[4].speaker, "B", "Now should stay with B")
+}
+
+test("3-word cap: no punctuation within 3 words means no heal") {
+    // "so it's a" (A) + "very interesting and remarkable exercise." (B)
+    // "exercise." has punctuation but is the 5th word — beyond 3-word scan
+    var words: [SpeakerWord] = [
+        SpeakerWord(word: makeWord("a", start: 0, end: 0.2), speaker: "A"),
+        SpeakerWord(word: makeWord("very", start: 0.25, end: 0.4), speaker: "B"),
+        SpeakerWord(word: makeWord("interesting", start: 0.45, end: 0.7), speaker: "B"),
+        SpeakerWord(word: makeWord("and", start: 0.75, end: 0.85), speaker: "B"),
+        SpeakerWord(word: makeWord("remarkable", start: 0.9, end: 1.2), speaker: "B"),
+        SpeakerWord(word: makeWord("exercise.", start: 1.25, end: 1.5), speaker: "B"),
+    ]
+    healSplitSentences(&words)
+    assertEqual(words[1].speaker, "B", "very should stay B (punctuation beyond 3-word cap)")
+}
+
 // MARK: - Summary
 
 print("\n\(passed) passed, \(failed) failed")

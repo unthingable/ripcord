@@ -311,6 +311,72 @@ public func smoothSpeakerRuns(_ words: inout [SpeakerWord], threshold: Double = 
     }
 }
 
+// MARK: - Heal Split Sentences
+
+/// Reassign words that complete an interrupted sentence back to the previous speaker.
+///
+/// At each speaker transition, if the previous speaker's last word doesn't end a sentence
+/// (no `.` `!` `?`) and the first 1-3 words of the new speaker complete it (end with sentence
+/// punctuation), those words are reassigned to the previous speaker. This fixes backward
+/// boundary leaks where the diarizer assigns the tail of a sentence to the next speaker.
+///
+/// Guards:
+/// - At most 3 words reassigned (scope cap)
+/// - Backchannel detection: if the word *after* the punctuated word returns to the previous
+///   speaker, it's likely an interjection ("right.", "okay.") and we skip the heal
+public func healSplitSentences(_ words: inout [SpeakerWord]) {
+    guard words.count >= 2 else { return }
+
+    var i = 1
+    while i < words.count {
+        // Find speaker transitions
+        guard let prevSpeaker = words[i - 1].speaker,
+              let curSpeaker = words[i].speaker,
+              prevSpeaker != curSpeaker
+        else {
+            i += 1
+            continue
+        }
+
+        // Criterion 1: Previous sentence is incomplete (no terminal punctuation)
+        if let lastChar = words[i - 1].word.word.last, sentenceEnders.contains(lastChar) {
+            i += 1
+            continue
+        }
+
+        // Criterion 2: Find first word ending with sentence punctuation within 1-3 words
+        let maxScan = min(i + 3, words.count)
+        var healEnd: Int? = nil
+
+        for j in i..<maxScan {
+            // Stop if we leave the new speaker's run
+            guard words[j].speaker == curSpeaker else { break }
+            if let lastChar = words[j].word.word.last, sentenceEnders.contains(lastChar) {
+                healEnd = j
+                break
+            }
+        }
+
+        guard let healEnd else {
+            i += 1
+            continue
+        }
+
+        // Criterion 3: Backchannel guard — if word after punctuated candidate returns
+        // to previous speaker, this is likely an interjection, not a boundary leak
+        if healEnd + 1 < words.count && words[healEnd + 1].speaker == prevSpeaker {
+            i += 1
+            continue
+        }
+
+        // Reassign words [i...healEnd] to the previous speaker
+        for k in i...healEnd {
+            words[k].speaker = prevSpeaker
+        }
+        i = healEnd + 1
+    }
+}
+
 // MARK: - Public Merge API
 
 /// Merge ASR result with optional diarization into transcript segments.
@@ -374,6 +440,9 @@ private func mergeWithDiarization(
 
     // Step 4: Smooth short false speaker switches
     smoothSpeakerRuns(&speakerWords)
+
+    // Step 4.5: Heal split sentences — reassign boundary words that complete an interrupted sentence
+    healSplitSentences(&speakerWords)
 
     // Step 5: Sentence-aware segment grouping
     return groupBySentenceAndSpeaker(speakerWords)
