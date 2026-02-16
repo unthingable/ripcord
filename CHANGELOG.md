@@ -1,8 +1,17 @@
 # Changelog
 
-## Unreleased
+## 0.5.0
 
+- Heal split sentences at speaker boundaries in diarization pipeline
+- Add sentence-aware segment grouping to diarization merge pipeline
 - Persist recording waveform across popover close/reopen
+
+## 0.4.0
+
+- Expose all FluidAudio diarization parameters in UI
+- Remove device change listener from SystemAudioCapture
+- Fix audio resource leak on quit and config change restart loop
+- Print output file path before transcription starts
 
 ## 0.3.0
 
