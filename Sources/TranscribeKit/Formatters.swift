@@ -9,20 +9,12 @@ public func formatTimestamp(_ seconds: Double) -> String {
     return String(format: "%02d:%02d", m, s)
 }
 
-private func formatTimestampSRT(_ seconds: Double) -> String {
+private func formatTimestampSubtitle(_ seconds: Double, separator: Character = ",") -> String {
     let h = Int(seconds / 3600)
     let m = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
     let s = Int(seconds.truncatingRemainder(dividingBy: 60))
     let ms = Int((seconds - Double(Int(seconds))) * 1000)
-    return String(format: "%02d:%02d:%02d,%03d", h, m, s, ms)
-}
-
-private func formatTimestampVTT(_ seconds: Double) -> String {
-    let h = Int(seconds / 3600)
-    let m = Int(seconds.truncatingRemainder(dividingBy: 3600) / 60)
-    let s = Int(seconds.truncatingRemainder(dividingBy: 60))
-    let ms = Int((seconds - Double(Int(seconds))) * 1000)
-    return String(format: "%02d:%02d:%02d.%03d", h, m, s, ms)
+    return String(format: "%02d:%02d:%02d\(separator)%03d", h, m, s, ms)
 }
 
 public func formatDuration(_ seconds: Double) -> String {
@@ -192,8 +184,8 @@ private func formatJson(segments: [TranscriptSegment], metadata: TranscriptMetad
 private func formatSrt(segments: [TranscriptSegment], metadata: TranscriptMetadata) -> String {
     var lines: [String] = []
     for (i, seg) in segments.enumerated() {
-        let start = formatTimestampSRT(seg.start)
-        let end = formatTimestampSRT(seg.end)
+        let start = formatTimestampSubtitle(seg.start)
+        let end = formatTimestampSubtitle(seg.end)
         var text = seg.text
         if let speaker = seg.speaker {
             text = "[\(speaker)] \(text)"
@@ -211,8 +203,8 @@ private func formatSrt(segments: [TranscriptSegment], metadata: TranscriptMetada
 private func formatVtt(segments: [TranscriptSegment], metadata: TranscriptMetadata) -> String {
     var lines = ["WEBVTT", ""]
     for seg in segments {
-        let start = formatTimestampVTT(seg.start)
-        let end = formatTimestampVTT(seg.end)
+        let start = formatTimestampSubtitle(seg.start, separator: ".")
+        let end = formatTimestampSubtitle(seg.end, separator: ".")
         let text: String
         if let speaker = seg.speaker {
             text = "<v \(speaker)>\(seg.text)"

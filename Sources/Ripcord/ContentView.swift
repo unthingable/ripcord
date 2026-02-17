@@ -78,14 +78,12 @@ struct ContentView: View {
                         ProgressView().controlSize(.small)
                         Text("Loading models…")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
                     }
                 } else if case .downloadingModels = manager.transcriptionService.state {
                     HStack(spacing: 4) {
                         ProgressView().controlSize(.small)
                         Text("Downloading models…")
                             .font(.caption2)
-                            .foregroundStyle(.secondary)
                     }
                 }
 
@@ -186,7 +184,7 @@ struct ContentView: View {
                     Spacer()
                     Text("/ \(formatTime(manager.bufferDurationSeconds))")
                         .font(.caption)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -470,166 +468,14 @@ struct ContentView: View {
 
     @ViewBuilder
     private func recordingRow(_ recording: RecordingInfo) -> some View {
-        VStack(alignment: .leading, spacing: 2) {
-            Button(action: {
-                NSWorkspace.shared.activateFileViewerSelecting([recording.url])
-            }) {
-                HStack {
-                    VStack(alignment: .leading) {
-                        if renamingURL == recording.url {
-                            let stem = recording.url.deletingPathExtension().lastPathComponent
-                            let (base, _) = RecordingManager.parseFilenameParts(stem)
-                            let ext = recording.url.pathExtension
-                            HStack(spacing: 0) {
-                                Text(base + "_")
-                                    .font(.caption)
-                                    .foregroundStyle(.secondary)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .fixedSize()
-                                TextField("name", text: $renameText, onCommit: {
-                                    manager.renameRecording(recording, to: renameText)
-                                    renamingURL = nil
-                                })
-                                .textFieldStyle(.plain)
-                                .font(.caption)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(.white))
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
-                                .onExitCommand { renamingURL = nil }
-                            }
-                            .lineLimit(1)
-                        } else {
-                            Text(recording.filename)
-                                .font(.caption)
-                                .lineLimit(1)
-                        }
-                        Text("\(recording.formattedDuration) - \(recording.formattedSize)")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                    Spacer()
-                    if renamingURL != recording.url {
-                        Button(action: {
-                            let stem = recording.url.deletingPathExtension().lastPathComponent
-                            let (_, name) = RecordingManager.parseFilenameParts(stem)
-                            renameText = name
-                            renamingURL = recording.url
-                        }) {
-                            Image(systemName: "pencil")
-                                .foregroundStyle(.secondary)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Rename")
-                    }
-                    Image(systemName: "folder")
-                        .foregroundStyle(.secondary)
-                }
-            }
-            .buttonStyle(.plain)
-            .accessibilityHint("Opens recording in Finder")
-            .contextMenu {
-                Button("Rename\u{2026}") {
-                    let stem = recording.url.deletingPathExtension().lastPathComponent
-                    let (_, name) = RecordingManager.parseFilenameParts(stem)
-                    renameText = name
-                    renamingURL = recording.url
-                }
-                Button("Show in Finder") {
-                    NSWorkspace.shared.activateFileViewerSelecting([recording.url])
-                }
-            }
-
-            // Per-recording transcription actions
-            HStack(spacing: 8) {
-                if manager.transcriptionService.transcribingURL == recording.url {
-                    HStack(spacing: 4) {
-                        ProgressView().controlSize(.small)
-                        Text("Transcribing\u{2026}")
-                            .font(.caption2)
-                            .foregroundStyle(.secondary)
-                    }
-                } else if transcriptExists(for: recording) {
-                    Button(action: { copyTranscript(for: recording) }) {
-                        Label("Copy Transcript", systemImage: "doc.on.doc")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-
-                    if manager.transcriptionService.modelsReady {
-                        Button(action: {
-                            pendingTranscriptionConfig = manager.transcriptionConfig
-                            transcribeTarget = recording
-                        }) {
-                            Image(systemName: "arrow.clockwise")
-                                .font(.caption2)
-                        }
-                        .buttonStyle(.plain)
-                        .help("Re-transcribe")
-                    }
-                } else if manager.transcriptionService.modelsReady {
-                    Button(action: {
-                        pendingTranscriptionConfig = manager.transcriptionConfig
-                        transcribeTarget = recording
-                    }) {
-                        Label("Transcribe", systemImage: "waveform")
-                            .font(.caption)
-                    }
-                    .buttonStyle(.plain)
-                }
-            }
-            .popover(isPresented: Binding(
-                get: { transcribeTarget?.url == recording.url },
-                set: { if !$0 { transcribeTarget = nil } }
-            ), arrowEdge: .trailing) {
-                TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
-                    let target = transcribeTarget
-                    transcribeTarget = nil
-                    if let target {
-                        manager.transcribeRecording(target, config: pendingTranscriptionConfig)
-                    }
-                } onCancel: {
-                    transcribeTarget = nil
-                }
-            }
-        }
-    }
-
-    private func transcriptURL(for recording: RecordingInfo) -> URL? {
-        let fm = FileManager.default
-        let dir = recording.url.deletingLastPathComponent()
-        let stem = recording.url.deletingPathExtension().lastPathComponent
-        var newest: (url: URL, date: Date)?
-        for format in OutputFormat.allCases {
-            let ext = format.rawValue
-            // Check base file, then -1, -2, ... until gap
-            var i = 0
-            while true {
-                let name = i == 0 ? "\(stem).\(ext)" : "\(stem)-\(i).\(ext)"
-                let url = dir.appendingPathComponent(name)
-                guard fm.fileExists(atPath: url.path) else { break }
-                if let mod = try? fm.attributesOfItem(atPath: url.path)[.modificationDate] as? Date,
-                   newest == nil || mod > newest!.date { newest = (url, mod) }
-                i += 1
-            }
-        }
-        return newest?.url
-    }
-
-    private func transcriptExists(for recording: RecordingInfo) -> Bool {
-        let base = recording.url.deletingPathExtension()
-        for format in OutputFormat.allCases {
-            if FileManager.default.fileExists(atPath: base.appendingPathExtension(format.rawValue).path) { return true }
-        }
-        return false
-    }
-
-    private func copyTranscript(for recording: RecordingInfo) {
-        guard let url = transcriptURL(for: recording),
-              let text = try? String(contentsOf: url, encoding: .utf8) else { return }
-        NSPasteboard.general.clearContents()
-        NSPasteboard.general.setString(text, forType: .string)
+        RecordingRowView(
+            recording: recording,
+            manager: manager,
+            renamingURL: $renamingURL,
+            renameText: $renameText,
+            transcribeTarget: $transcribeTarget,
+            pendingTranscriptionConfig: $pendingTranscriptionConfig
+        )
     }
 
     // MARK: - Global Hotkey
@@ -668,6 +514,135 @@ struct ContentView: View {
         let m = seconds / 60
         let s = seconds % 60
         return String(format: "%d:%02d", m, s)
+    }
+}
+
+// MARK: - Recording Row
+
+private struct RecordingRowView: View {
+    let recording: RecordingInfo
+    let manager: RecordingManager
+    @Binding var renamingURL: URL?
+    @Binding var renameText: String
+    @Binding var transcribeTarget: RecordingInfo?
+    @Binding var pendingTranscriptionConfig: TranscriptionConfig
+
+    @State private var isHovered = false
+
+    var body: some View {
+        HStack {
+            Button(action: {
+                NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+            }) {
+                HStack {
+                    VStack(alignment: .leading) {
+                        if renamingURL == recording.url {
+                            let stem = recording.url.deletingPathExtension().lastPathComponent
+                            let (base, _) = RecordingManager.parseFilenameParts(stem)
+                            HStack(spacing: 0) {
+                                Text(base + "_")
+                                    .font(.caption)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .fixedSize()
+                                TextField("name", text: $renameText, onCommit: {
+                                    manager.renameRecording(recording, to: renameText)
+                                    renamingURL = nil
+                                })
+                                .textFieldStyle(.plain)
+                                .font(.caption)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(.white))
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+                                .onExitCommand { renamingURL = nil }
+                            }
+                            .lineLimit(1)
+                        } else {
+                            Text(recording.filename)
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
+                        Text("\(recording.formattedDuration) - \(recording.formattedSize)")
+                            .font(.caption2)
+                    }
+                    Spacer()
+                }
+                .contentShape(Rectangle())
+            }
+            .buttonStyle(.plain)
+            .accessibilityHint("Opens recording in Finder")
+            .help("Show in Finder")
+
+            if renamingURL != recording.url {
+                HStack(spacing: 6) {
+                    Button(action: startRenaming) {
+                        Image(systemName: "pencil")
+                            .font(.body)
+                            .foregroundStyle(.secondary)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Rename")
+
+                    if manager.transcriptionService.transcribingURL == recording.url {
+                        ProgressView().controlSize(.small)
+                    } else if manager.transcriptionService.modelsReady {
+                        Button(action: {
+                            pendingTranscriptionConfig = manager.transcriptionConfig
+                            transcribeTarget = recording
+                        }) {
+                            Image(systemName: transcriptExists() ? "arrow.triangle.2.circlepath" : "waveform")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help(transcriptExists() ? "Re-transcribe" : "Transcribe")
+                        .popover(isPresented: Binding(
+                            get: { transcribeTarget?.url == recording.url },
+                            set: { if !$0 { transcribeTarget = nil } }
+                        ), arrowEdge: .trailing) {
+                            TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
+                                let target = transcribeTarget
+                                transcribeTarget = nil
+                                if let target {
+                                    manager.transcribeRecording(target, config: pendingTranscriptionConfig)
+                                }
+                            } onCancel: {
+                                transcribeTarget = nil
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(.primary.opacity(isHovered ? 0.06 : 0))
+        )
+        .onHover { isHovered = $0 }
+        .contextMenu {
+            Button("Rename\u{2026}", action: startRenaming)
+            Button("Show in Finder") {
+                NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+            }
+        }
+    }
+
+    private func startRenaming() {
+        let stem = recording.url.deletingPathExtension().lastPathComponent
+        let (_, name) = RecordingManager.parseFilenameParts(stem)
+        renameText = name
+        renamingURL = recording.url
+    }
+
+    private func transcriptExists() -> Bool {
+        let base = recording.url.deletingPathExtension()
+        for format in OutputFormat.allCases {
+            if FileManager.default.fileExists(atPath: base.appendingPathExtension(format.rawValue).path) {
+                return true
+            }
+        }
+        return false
     }
 }
 

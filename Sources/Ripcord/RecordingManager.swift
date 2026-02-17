@@ -384,13 +384,7 @@ final class RecordingManager: @unchecked Sendable {
         }
         let filename = parts.joined(separator: "_") + ".\(outputFormat.fileExtension)"
 
-        // Add name to history if non-empty
-        if !sanitizedName.isEmpty {
-            nameHistory.removeAll { $0.caseInsensitiveCompare(sanitizedName) == .orderedSame }
-            nameHistory.insert(sanitizedName, at: 0)
-            if nameHistory.count > 50 { nameHistory = Array(nameHistory.prefix(50)) }
-            UserDefaults.standard.set(nameHistory, forKey: SettingsKey.recordingNameHistory)
-        }
+        addToNameHistory(sanitizedName)
         recordingName = ""
 
         let outputDir = outputDirectory
@@ -771,7 +765,7 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         // Rename associated transcript files (including -1, -2, etc. variants)
-        let transcriptExtensions = ["txt", "srt", "vtt"]
+        let transcriptExtensions = OutputFormat.allCases.map(\.rawValue)
         for tExt in transcriptExtensions {
             let oldTranscript = dir.appendingPathComponent(oldStem + ".\(tExt)")
             let newTranscript = dir.appendingPathComponent(newStem + ".\(tExt)")
@@ -794,13 +788,15 @@ final class RecordingManager: @unchecked Sendable {
             recentRecordings[idx].url = newURL
         }
 
-        // Add name to history
-        if !sanitized.isEmpty {
-            nameHistory.removeAll { $0.caseInsensitiveCompare(sanitized) == .orderedSame }
-            nameHistory.insert(sanitized, at: 0)
-            if nameHistory.count > 50 { nameHistory = Array(nameHistory.prefix(50)) }
-            UserDefaults.standard.set(nameHistory, forKey: SettingsKey.recordingNameHistory)
-        }
+        addToNameHistory(sanitized)
+    }
+
+    private func addToNameHistory(_ name: String) {
+        guard !name.isEmpty else { return }
+        nameHistory.removeAll { $0.caseInsensitiveCompare(name) == .orderedSame }
+        nameHistory.insert(name, at: 0)
+        if nameHistory.count > 50 { nameHistory = Array(nameHistory.prefix(50)) }
+        UserDefaults.standard.set(nameHistory, forKey: SettingsKey.recordingNameHistory)
     }
 
     func nameSuggestions(for input: String) -> [String] {

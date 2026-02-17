@@ -581,7 +581,6 @@ private func emitSegment(from words: [SpeakerWord]) -> TranscriptSegment {
 private func segmentWithoutDiarization(words: [WordTiming]) -> [TranscriptSegment] {
     var segments: [TranscriptSegment] = []
     var currentWords: [WordTiming] = []
-    let sentenceEnders: Set<Character> = [".", "!", "?"]
 
     for word in words {
         currentWords.append(word)
