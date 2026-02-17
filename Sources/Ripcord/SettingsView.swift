@@ -101,6 +101,24 @@ struct SettingsView: View {
                 }
 
                 Section("General") {
+                    LabeledContent("File Prefix") {
+                        VStack(alignment: .trailing, spacing: 2) {
+                            TextField("", text: Binding(
+                                get: { manager.filePrefix },
+                                set: { manager.updateFilePrefix($0) }
+                            ))
+                            .textFieldStyle(.roundedBorder)
+                            .frame(width: 120)
+
+                            let preview = manager.filePrefix.trimmingCharacters(in: .whitespaces).isEmpty
+                                ? "2024-01-01_12-00-00.wav"
+                                : "\(manager.filePrefix.trimmingCharacters(in: .whitespaces))_2024-01-01_12-00-00.wav"
+                            Text(preview)
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                    }
+
                     LabeledContent("Recordings") {
                         HStack {
                             Text(manager.outputDirectory.path)

@@ -236,7 +236,7 @@ final class AudioFileWriter: @unchecked Sendable {
 }
 
 struct RecordingInfo {
-    let url: URL
+    var url: URL
     let duration: Double
     let fileSize: UInt64
 

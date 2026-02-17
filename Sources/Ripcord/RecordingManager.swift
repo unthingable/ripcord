@@ -43,6 +43,8 @@ enum SettingsKey {
     static let speechThreshold = "ripcord.speechThreshold"
     static let minSegmentDuration = "ripcord.minSegmentDuration"
     static let minGapDuration = "ripcord.minGapDuration"
+    static let filePrefix = "ripcord.filePrefix"
+    static let recordingNameHistory = "ripcord.recordingNameHistory"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -95,6 +97,9 @@ final class RecordingManager: @unchecked Sendable {
     var silenceThreshold: Float = 0.01
     var silenceTimeoutSeconds: Double = 3.0
     var isSilencePaused: Bool = false
+    var filePrefix: String = "ripcord"
+    var recordingName: String = ""
+    var nameHistory: [String] = []
 
     let transcriptionService = TranscriptionService()
     let deviceEnumerator = AudioDeviceEnumerator()
@@ -250,6 +255,12 @@ final class RecordingManager: @unchecked Sendable {
         if defaults.object(forKey: SettingsKey.minGapDuration) != nil {
             transcriptionConfig.minGapDuration = defaults.double(forKey: SettingsKey.minGapDuration)
         }
+
+        // Load file prefix and name history
+        if let savedPrefix = defaults.string(forKey: SettingsKey.filePrefix) {
+            filePrefix = savedPrefix
+        }
+        nameHistory = (defaults.stringArray(forKey: SettingsKey.recordingNameHistory) ?? [])
     }
 
     deinit {
@@ -361,7 +372,27 @@ final class RecordingManager: @unchecked Sendable {
             .replacingOccurrences(of: "T", with: "_")
             .prefix(19)
 
-        let filename = "ripcord_\(timestamp).\(outputFormat.fileExtension)"
+        let sanitizedName = Self.sanitizeRecordingName(recordingName)
+        var parts: [String] = []
+        let trimmedPrefix = filePrefix.trimmingCharacters(in: .whitespaces)
+        if !trimmedPrefix.isEmpty {
+            parts.append(trimmedPrefix)
+        }
+        parts.append(String(timestamp))
+        if !sanitizedName.isEmpty {
+            parts.append(sanitizedName)
+        }
+        let filename = parts.joined(separator: "_") + ".\(outputFormat.fileExtension)"
+
+        // Add name to history if non-empty
+        if !sanitizedName.isEmpty {
+            nameHistory.removeAll { $0.caseInsensitiveCompare(sanitizedName) == .orderedSame }
+            nameHistory.insert(sanitizedName, at: 0)
+            if nameHistory.count > 50 { nameHistory = Array(nameHistory.prefix(50)) }
+            UserDefaults.standard.set(nameHistory, forKey: SettingsKey.recordingNameHistory)
+        }
+        recordingName = ""
+
         let outputDir = outputDirectory
 
         do {
@@ -706,6 +737,107 @@ final class RecordingManager: @unchecked Sendable {
             micCapture.stop()
             await startMic()
         }
+    }
+
+    func updateFilePrefix(_ prefix: String) {
+        filePrefix = prefix
+        UserDefaults.standard.set(prefix, forKey: SettingsKey.filePrefix)
+    }
+
+    func renameRecording(_ recording: RecordingInfo, to newName: String) {
+        let sanitized = Self.sanitizeRecordingName(newName)
+        let oldURL = recording.url
+        let dir = oldURL.deletingLastPathComponent()
+        let ext = oldURL.pathExtension
+
+        // Parse existing filename to extract prefix+timestamp portion
+        let oldStem = oldURL.deletingPathExtension().lastPathComponent
+        let (basePart, _) = Self.parseFilenameParts(oldStem)
+
+        // Build new stem
+        var newStem = basePart
+        if !sanitized.isEmpty {
+            newStem += "_\(sanitized)"
+        }
+
+        let newURL = dir.appendingPathComponent(newStem + ".\(ext)")
+        guard newURL != oldURL else { return }
+
+        let fm = FileManager.default
+        do {
+            try fm.moveItem(at: oldURL, to: newURL)
+        } catch {
+            return
+        }
+
+        // Rename associated transcript files (including -1, -2, etc. variants)
+        let transcriptExtensions = ["txt", "srt", "vtt"]
+        for tExt in transcriptExtensions {
+            let oldTranscript = dir.appendingPathComponent(oldStem + ".\(tExt)")
+            let newTranscript = dir.appendingPathComponent(newStem + ".\(tExt)")
+            if fm.fileExists(atPath: oldTranscript.path) {
+                try? fm.moveItem(at: oldTranscript, to: newTranscript)
+            }
+            // Numbered variants: stem-1.txt, stem-2.txt, ...
+            var i = 1
+            while true {
+                let oldNumbered = dir.appendingPathComponent("\(oldStem)-\(i).\(tExt)")
+                guard fm.fileExists(atPath: oldNumbered.path) else { break }
+                let newNumbered = dir.appendingPathComponent("\(newStem)-\(i).\(tExt)")
+                try? fm.moveItem(at: oldNumbered, to: newNumbered)
+                i += 1
+            }
+        }
+
+        // Update entry in recentRecordings
+        if let idx = recentRecordings.firstIndex(where: { $0.url == oldURL }) {
+            recentRecordings[idx].url = newURL
+        }
+
+        // Add name to history
+        if !sanitized.isEmpty {
+            nameHistory.removeAll { $0.caseInsensitiveCompare(sanitized) == .orderedSame }
+            nameHistory.insert(sanitized, at: 0)
+            if nameHistory.count > 50 { nameHistory = Array(nameHistory.prefix(50)) }
+            UserDefaults.standard.set(nameHistory, forKey: SettingsKey.recordingNameHistory)
+        }
+    }
+
+    func nameSuggestions(for input: String) -> [String] {
+        let trimmed = input.trimmingCharacters(in: .whitespaces)
+        guard !trimmed.isEmpty else { return [] }
+        return Array(nameHistory
+            .filter { $0.localizedCaseInsensitiveContains(trimmed) && $0.caseInsensitiveCompare(trimmed) != .orderedSame }
+            .prefix(5))
+    }
+
+    /// Parses a filename stem into (prefix+timestamp, name) components.
+    /// E.g. "ripcord_2024-01-01_12-00-00_episode-42" → ("ripcord_2024-01-01_12-00-00", "episode-42")
+    /// E.g. "2024-01-01_12-00-00_meeting" → ("2024-01-01_12-00-00", "meeting")
+    static func parseFilenameParts(_ stem: String) -> (base: String, name: String) {
+        // Match timestamp pattern: YYYY-MM-DD_HH-MM-SS
+        let pattern = #"\d{4}-\d{2}-\d{2}_\d{2}-\d{2}-\d{2}"#
+        guard let range = stem.range(of: pattern, options: .regularExpression) else {
+            return (stem, "")
+        }
+        let tsEnd = range.upperBound
+        let base = String(stem[stem.startIndex..<tsEnd])
+        // Everything after the timestamp (skip leading underscore)
+        let remainder = stem[tsEnd...]
+        if remainder.hasPrefix("_") {
+            return (base, String(remainder.dropFirst()))
+        }
+        return (base, "")
+    }
+
+    static func sanitizeRecordingName(_ name: String) -> String {
+        var s = name.trimmingCharacters(in: .whitespaces)
+        s = s.replacingOccurrences(of: " ", with: "-")
+        // Strip path-unsafe characters
+        let allowed = CharacterSet.alphanumerics.union(CharacterSet(charactersIn: "-_."))
+        s = String(s.unicodeScalars.filter { allowed.contains($0) })
+        if s.count > 80 { s = String(s.prefix(80)) }
+        return s
     }
 
     var bufferFillSeconds: Int {

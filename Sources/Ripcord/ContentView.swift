@@ -10,6 +10,8 @@ struct ContentView: View {
     @Environment(\.openSettings) private var openSettings
     @State private var showFileTranscribePopover = false
     @State private var fileTranscribeURL: URL?
+    @State private var renamingURL: URL?
+    @State private var renameText: String = ""
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -23,7 +25,10 @@ struct ContentView: View {
                     .onDisappear { manager.stopWaveformTimer() }
             }
 
-            Divider()
+            // Recording name field
+            if manager.state == .buffering || manager.state == .recording {
+                nameField
+            }
 
             // Record / Stop button
             recordButton
@@ -97,7 +102,8 @@ struct ContentView: View {
             }
         }
         .padding(8)
-        .frame(width: 260)
+        .frame(width: 320)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onAppear {
             setupGlobalHotkey()
         }
@@ -285,6 +291,37 @@ struct ContentView: View {
         }
     }
 
+    // MARK: - Name Field
+
+    @ViewBuilder
+    private var nameField: some View {
+        VStack(alignment: .leading, spacing: 2) {
+            TextField("Name this recording\u{2026}", text: $manager.recordingName)
+                .textFieldStyle(.plain)
+                .font(.caption)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 3)
+                .background(RoundedRectangle(cornerRadius: 4).fill(.white))
+                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+
+            let suggestions = manager.nameSuggestions(for: manager.recordingName)
+            if !manager.recordingName.isEmpty && !suggestions.isEmpty {
+                HStack(spacing: 4) {
+                    ForEach(suggestions, id: \.self) { suggestion in
+                        Button(suggestion) {
+                            manager.recordingName = suggestion
+                        }
+                        .font(.caption2)
+                        .buttonStyle(.plain)
+                        .padding(.horizontal, 4)
+                        .padding(.vertical, 1)
+                        .background(Capsule().fill(.primary.opacity(0.08)))
+                    }
+                }
+            }
+        }
+    }
+
     // MARK: - Record Button
 
     @ViewBuilder
@@ -439,20 +476,70 @@ struct ContentView: View {
             }) {
                 HStack {
                     VStack(alignment: .leading) {
-                        Text(recording.filename)
-                            .font(.caption)
+                        if renamingURL == recording.url {
+                            let stem = recording.url.deletingPathExtension().lastPathComponent
+                            let (base, _) = RecordingManager.parseFilenameParts(stem)
+                            let ext = recording.url.pathExtension
+                            HStack(spacing: 0) {
+                                Text(base + "_")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                                    .lineLimit(1)
+                                    .truncationMode(.middle)
+                                    .fixedSize()
+                                TextField("name", text: $renameText, onCommit: {
+                                    manager.renameRecording(recording, to: renameText)
+                                    renamingURL = nil
+                                })
+                                .textFieldStyle(.plain)
+                                .font(.caption)
+                                .padding(.horizontal, 4)
+                                .padding(.vertical, 2)
+                                .background(RoundedRectangle(cornerRadius: 4).fill(.white))
+                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+                                .onExitCommand { renamingURL = nil }
+                            }
                             .lineLimit(1)
+                        } else {
+                            Text(recording.filename)
+                                .font(.caption)
+                                .lineLimit(1)
+                        }
                         Text("\(recording.formattedDuration) - \(recording.formattedSize)")
                             .font(.caption2)
                             .foregroundStyle(.secondary)
                     }
                     Spacer()
+                    if renamingURL != recording.url {
+                        Button(action: {
+                            let stem = recording.url.deletingPathExtension().lastPathComponent
+                            let (_, name) = RecordingManager.parseFilenameParts(stem)
+                            renameText = name
+                            renamingURL = recording.url
+                        }) {
+                            Image(systemName: "pencil")
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Rename")
+                    }
                     Image(systemName: "folder")
                         .foregroundStyle(.secondary)
                 }
             }
             .buttonStyle(.plain)
             .accessibilityHint("Opens recording in Finder")
+            .contextMenu {
+                Button("Rename\u{2026}") {
+                    let stem = recording.url.deletingPathExtension().lastPathComponent
+                    let (_, name) = RecordingManager.parseFilenameParts(stem)
+                    renameText = name
+                    renamingURL = recording.url
+                }
+                Button("Show in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+                }
+            }
 
             // Per-recording transcription actions
             HStack(spacing: 8) {
