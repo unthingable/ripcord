@@ -1,5 +1,19 @@
 # Changelog
 
+## 0.6.1
+
+- Fix dark mode: replace hardcoded white TextField backgrounds with system color
+- Simplify expressions and deduplicate helpers across codebase
+- Narrow JSON types from Codable to Encodable
+- Optimize interleave buffer allocation on audio write path
+
+## 0.6.0
+
+- Add recording naming, renaming, and customizable file prefix
+- Fix recording row layout: independent tooltips and popover anchoring
+- Consolidate SRT/VTT timestamp formatters into a single function
+- Use OutputFormat.allCases for transcript file detection
+
 ## 0.5.0
 
 - Heal split sentences at speaker boundaries in diarization pipeline

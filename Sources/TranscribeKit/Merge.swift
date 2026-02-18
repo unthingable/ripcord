@@ -29,17 +29,20 @@ public func mergeTokensIntoWords(_ tokenTimings: [TokenTiming]) -> [WordTiming] 
     var currentEnd: TimeInterval = 0
     var confidences: [Float] = []
 
+    func emitWord() {
+        guard !currentWord.isEmpty, let start = currentStart else { return }
+        let avgConf = confidences.isEmpty
+            ? Float(0) : confidences.reduce(0, +) / Float(confidences.count)
+        words.append(WordTiming(
+            word: currentWord, startTime: start,
+            endTime: currentEnd, confidence: avgConf))
+    }
+
     for timing in tokenTimings {
         let token = timing.token
 
         if token.hasPrefix(" ") || token.hasPrefix("\n") || token.hasPrefix("\t") {
-            if !currentWord.isEmpty, let start = currentStart {
-                let avgConf = confidences.isEmpty
-                    ? Float(0) : confidences.reduce(0, +) / Float(confidences.count)
-                words.append(WordTiming(
-                    word: currentWord, startTime: start,
-                    endTime: currentEnd, confidence: avgConf))
-            }
+            emitWord()
             currentWord = token.trimmingCharacters(in: .whitespacesAndNewlines)
             currentStart = timing.startTime
             currentEnd = timing.endTime
@@ -54,14 +57,7 @@ public func mergeTokensIntoWords(_ tokenTimings: [TokenTiming]) -> [WordTiming] 
         }
     }
 
-    if !currentWord.isEmpty, let start = currentStart {
-        let avgConf = confidences.isEmpty
-            ? Float(0) : confidences.reduce(0, +) / Float(confidences.count)
-        words.append(WordTiming(
-            word: currentWord, startTime: start,
-            endTime: currentEnd, confidence: avgConf))
-    }
-
+    emitWord()
     return words
 }
 
@@ -110,14 +106,9 @@ public func findSpeakerByOverlap(
     for seg in segments {
         let segStart = Double(seg.startTimeSeconds)
         let segEnd = Double(seg.endTimeSeconds)
-        let distance: Double
-        if wordMid < segStart {
-            distance = segStart - wordMid
-        } else if wordMid > segEnd {
-            distance = wordMid - segEnd
-        } else {
-            distance = 0
-        }
+        let distance = wordMid < segStart ? segStart - wordMid
+                     : wordMid > segEnd   ? wordMid - segEnd
+                     : 0.0
         if distance < bestDistance {
             bestDistance = distance
             bestSpeaker = seg.speakerId
@@ -174,7 +165,7 @@ public func snapTransitionsToPauses(
         // No pause at transition — look ahead for the first real pause within the new speaker's run
         let prevSpeaker = words[i - 1].speaker
         let newSpeaker = words[i].speaker
-        var snapTo: Int? = nil
+        var snapTo: Int?
         var accumulated = words[i].word.endTime - words[i].word.startTime
 
         for j in (i + 1)..<words.count {
@@ -346,7 +337,7 @@ public func healSplitSentences(_ words: inout [SpeakerWord]) {
 
         // Criterion 2: Find first word ending with sentence punctuation within 1-3 words
         let maxScan = min(i + 3, words.count)
-        var healEnd: Int? = nil
+        var healEnd: Int?
 
         for j in i..<maxScan {
             // Stop if we leave the new speaker's run
@@ -385,19 +376,18 @@ public func mergeResults(
     diarizationResult: DiarizationResult?,
     removeFillerWords: Bool = false
 ) -> [TranscriptSegment] {
+    let fallbackSegment = TranscriptSegment(
+        start: 0, end: asrResult.duration,
+        text: asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines),
+        speaker: nil)
+
     guard let tokenTimings = asrResult.tokenTimings, !tokenTimings.isEmpty else {
-        return [TranscriptSegment(
-            start: 0, end: asrResult.duration,
-            text: asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines),
-            speaker: nil)]
+        return [fallbackSegment]
     }
 
     var words = mergeTokensIntoWords(tokenTimings)
     guard !words.isEmpty else {
-        return [TranscriptSegment(
-            start: 0, end: asrResult.duration,
-            text: asrResult.text.trimmingCharacters(in: .whitespacesAndNewlines),
-            speaker: nil)]
+        return [fallbackSegment]
     }
 
     // Filter filler words before speaker assignment
@@ -423,7 +413,7 @@ private func mergeWithDiarization(
 
     // Step 1: Overlap-based speaker assignment with continuity bias
     var speakerWords: [SpeakerWord] = []
-    var previousSpeaker: String? = nil
+    var previousSpeaker: String?
     for word in words {
         let speaker = findSpeakerByOverlap(
             wordStart: word.startTime, wordEnd: word.endTime,
@@ -441,10 +431,10 @@ private func mergeWithDiarization(
     // Step 4: Smooth short false speaker switches
     smoothSpeakerRuns(&speakerWords)
 
-    // Step 4.5: Heal split sentences — reassign boundary words that complete an interrupted sentence
+    // Step 5: Heal split sentences — reassign boundary words that complete an interrupted sentence
     healSplitSentences(&speakerWords)
 
-    // Step 5: Sentence-aware segment grouping
+    // Step 6: Sentence-aware segment grouping
     return groupBySentenceAndSpeaker(speakerWords)
 }
 
@@ -473,7 +463,7 @@ public func groupBySentenceAndSpeaker(_ speakerWords: [SpeakerWord]) -> [Transcr
     // Accumulator: (word, speaker) pairs for the current segment
     var accum: [SpeakerWord] = []
     // Index within accum of the last speaker change (used for force-emit split point)
-    var lastSpeakerChangeIdx: Int? = nil
+    var lastSpeakerChangeIdx: Int?
 
     for (i, sw) in speakerWords.enumerated() {
         accum.append(sw)
@@ -485,21 +475,12 @@ public func groupBySentenceAndSpeaker(_ speakerWords: [SpeakerWord]) -> [Transcr
 
         // Detect sentence boundary: punctuation or significant pause to next word
         let isSentenceEnd = sw.word.word.last.map { sentenceEnders.contains($0) } ?? false
-        let isPause: Bool
-        if i + 1 < speakerWords.count {
-            isPause = (speakerWords[i + 1].word.startTime - sw.word.endTime) > 1.0
-        } else {
-            isPause = false
-        }
+        let hasNext = i + 1 < speakerWords.count
+        let isPause = hasNext && (speakerWords[i + 1].word.startTime - sw.word.endTime) > 1.0
         let isBoundary = isSentenceEnd || isPause
 
         // Check if the next word has a different speaker
-        let speakerChangesNext: Bool
-        if i + 1 < speakerWords.count {
-            speakerChangesNext = speakerWords[i + 1].speaker != sw.speaker
-        } else {
-            speakerChangesNext = false
-        }
+        let speakerChangesNext = hasNext && speakerWords[i + 1].speaker != sw.speaker
 
         // Emit when we hit a sentence boundary and the next word is a different speaker
         if isBoundary && speakerChangesNext {
@@ -582,30 +563,26 @@ private func segmentWithoutDiarization(words: [WordTiming]) -> [TranscriptSegmen
     var segments: [TranscriptSegment] = []
     var currentWords: [WordTiming] = []
 
+    func emitCurrentWords() {
+        guard let first = currentWords.first, let last = currentWords.last else { return }
+        segments.append(TranscriptSegment(
+            start: first.startTime, end: last.endTime,
+            text: currentWords.map(\.word).joined(separator: " "),
+            speaker: nil))
+        currentWords = []
+    }
+
     for word in words {
         currentWords.append(word)
 
         let isSentenceEnd = word.word.last.map { sentenceEnders.contains($0) } ?? false
-        let isPause = currentWords.count > 1
-            && (word.startTime - currentWords[currentWords.count - 2].endTime) > 1.0
+        let isPause = currentWords.count > 1 && (word.startTime - currentWords[currentWords.count - 2].endTime) > 1.0
 
         if isSentenceEnd || isPause {
-            segments.append(TranscriptSegment(
-                start: currentWords.first!.startTime,
-                end: currentWords.last!.endTime,
-                text: currentWords.map(\.word).joined(separator: " "),
-                speaker: nil))
-            currentWords = []
+            emitCurrentWords()
         }
     }
 
-    if !currentWords.isEmpty {
-        segments.append(TranscriptSegment(
-            start: currentWords.first!.startTime,
-            end: currentWords.last!.endTime,
-            text: currentWords.map(\.word).joined(separator: " "),
-            speaker: nil))
-    }
-
+    emitCurrentWords()
     return segments
 }

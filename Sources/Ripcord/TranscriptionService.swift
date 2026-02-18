@@ -46,14 +46,11 @@ final class TranscriptionService: @unchecked Sendable {
         }
     }
 
-    private var isFailedState: Bool {
-        if case .failed = state { return true }
-        return false
-    }
+    private var isFailedState: Bool { if case .failed = state { true } else { false } }
 
     /// Check whether model files exist on disk (no download, no loading).
     static func modelsExistOnDisk(config: TranscriptionConfig) -> Bool {
-        return Transcriber.modelsExistOnDisk(version: config.asrModelVersion)
+        Transcriber.modelsExistOnDisk(version: config.asrModelVersion)
     }
 
     // MARK: - Transcription Pipeline

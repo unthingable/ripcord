@@ -43,13 +43,16 @@ private func groupBySpeaker(_ segments: [TranscriptSegment]) -> [SpeakerGroup] {
     var currentTexts: [String] = []
     var currentStart: Double?
 
+    func emitGroup() {
+        guard !currentTexts.isEmpty else { return }
+        groups.append(SpeakerGroup(
+            speaker: currentSpeaker, start: currentStart ?? 0,
+            text: currentTexts.joined(separator: " ")))
+    }
+
     for seg in segments {
         if seg.speaker != currentSpeaker {
-            if !currentTexts.isEmpty {
-                groups.append(SpeakerGroup(
-                    speaker: currentSpeaker, start: currentStart ?? 0,
-                    text: currentTexts.joined(separator: " ")))
-            }
+            emitGroup()
             currentSpeaker = seg.speaker
             currentTexts = []
             currentStart = seg.start
@@ -57,12 +60,7 @@ private func groupBySpeaker(_ segments: [TranscriptSegment]) -> [SpeakerGroup] {
         currentTexts.append(seg.text)
     }
 
-    if !currentTexts.isEmpty {
-        groups.append(SpeakerGroup(
-            speaker: currentSpeaker, start: currentStart ?? 0,
-            text: currentTexts.joined(separator: " ")))
-    }
-
+    emitGroup()
     return groups
 }
 
@@ -85,13 +83,12 @@ public func formatOutput(
 // MARK: - Plain text
 
 private func formatTxt(segments: [TranscriptSegment], metadata: TranscriptMetadata) -> String {
-    var lines: [String] = []
     let hasSpeakers = segments.contains { $0.speaker != nil }
 
+    var lines: [String] = []
     if hasSpeakers {
         for group in groupBySpeaker(segments) {
-            let ts = formatTimestamp(group.start)
-            lines.append("[\(ts)] \(group.speaker ?? "Unknown"):")
+            lines.append("[\(formatTimestamp(group.start))] \(group.speaker ?? "Unknown"):")
             lines.append("  \(group.text)")
             lines.append("")
         }
@@ -116,14 +113,13 @@ private func formatMd(segments: [TranscriptSegment], metadata: TranscriptMetadat
     if !metadata.speakers.isEmpty {
         lines.append("- **Speakers:** \(metadata.speakers.count)")
     }
-    lines.append(contentsOf: ["", "---", ""])
+    lines += ["", "---", ""]
 
     let hasSpeakers = segments.contains { $0.speaker != nil }
 
     if hasSpeakers {
         for group in groupBySpeaker(segments) {
-            let ts = formatTimestamp(group.start)
-            lines.append("**\(group.speaker ?? "Unknown")** \u{2014} \(ts)")
+            lines.append("**\(group.speaker ?? "Unknown")** \u{2014} \(formatTimestamp(group.start))")
             lines.append("")
             lines.append(group.text)
             lines.append("")
@@ -142,20 +138,20 @@ private func formatMd(segments: [TranscriptSegment], metadata: TranscriptMetadat
 
 // MARK: - JSON
 
-private struct JsonSegment: Codable {
+private struct JsonSegment: Encodable {
     let start: Double
     let end: Double
     let text: String
     let speaker: String?
 }
 
-private struct JsonMetadata: Codable {
+private struct JsonMetadata: Encodable {
     let duration: Double
     let speakers: [String]
     let source_file: String
 }
 
-private struct JsonOutput: Codable {
+private struct JsonOutput: Encodable {
     let metadata: JsonMetadata
     let segments: [JsonSegment]
 }
@@ -184,14 +180,9 @@ private func formatJson(segments: [TranscriptSegment], metadata: TranscriptMetad
 private func formatSrt(segments: [TranscriptSegment], metadata: TranscriptMetadata) -> String {
     var lines: [String] = []
     for (i, seg) in segments.enumerated() {
-        let start = formatTimestampSubtitle(seg.start)
-        let end = formatTimestampSubtitle(seg.end)
-        var text = seg.text
-        if let speaker = seg.speaker {
-            text = "[\(speaker)] \(text)"
-        }
+        let text = seg.speaker.map { "[\($0)] \(seg.text)" } ?? seg.text
         lines.append("\(i + 1)")
-        lines.append("\(start) --> \(end)")
+        lines.append("\(formatTimestampSubtitle(seg.start)) --> \(formatTimestampSubtitle(seg.end))")
         lines.append(text)
         lines.append("")
     }
@@ -203,15 +194,8 @@ private func formatSrt(segments: [TranscriptSegment], metadata: TranscriptMetada
 private func formatVtt(segments: [TranscriptSegment], metadata: TranscriptMetadata) -> String {
     var lines = ["WEBVTT", ""]
     for seg in segments {
-        let start = formatTimestampSubtitle(seg.start, separator: ".")
-        let end = formatTimestampSubtitle(seg.end, separator: ".")
-        let text: String
-        if let speaker = seg.speaker {
-            text = "<v \(speaker)>\(seg.text)"
-        } else {
-            text = seg.text
-        }
-        lines.append("\(start) --> \(end)")
+        let text = seg.speaker.map { "<v \($0)>\(seg.text)" } ?? seg.text
+        lines.append("\(formatTimestampSubtitle(seg.start, separator: ".")) --> \(formatTimestampSubtitle(seg.end, separator: "."))")
         lines.append(text)
         lines.append("")
     }
