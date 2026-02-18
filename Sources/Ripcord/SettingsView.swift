@@ -276,9 +276,9 @@ struct SettingsView: View {
 
     private var micStatusLabel: String {
         switch manager.micStatus {
-        case .permissionDenied: return "Microphone (no permission)"
-        case .failed: return "Microphone (failed)"
-        case .off, .active: return "Microphone"
+        case .permissionDenied:  "Microphone (no permission)"
+        case .failed:            "Microphone (failed)"
+        case .off, .active:      "Microphone"
         }
     }
 

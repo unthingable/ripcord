@@ -867,12 +867,13 @@ final class RecordingManager: @unchecked Sendable {
     static func interleave(_ system: [Float], _ mic: [Float]) -> [Float] {
         let len = max(system.count, mic.count)
         guard len > 0 else { return [] }
-        var result = [Float](repeating: 0, count: len * 2)
-        for i in 0..<len {
-            result[i * 2]     = i < system.count ? system[i] : 0  // L
-            result[i * 2 + 1] = i < mic.count    ? mic[i]    : 0  // R
+        return [Float](unsafeUninitializedCapacity: len * 2) { buffer, count in
+            for i in 0..<len {
+                buffer[i * 2]     = i < system.count ? system[i] : 0  // L
+                buffer[i * 2 + 1] = i < mic.count    ? mic[i]    : 0  // R
+            }
+            count = len * 2
         }
-        return result
     }
 
     // MARK: - Private
@@ -934,11 +935,10 @@ final class RecordingManager: @unchecked Sendable {
         systemRemainder = []
         micRemainder = []
 
-        // Recording waveform: accumulate peak amplitude into the ring buffer.
-        // Runs before silence detection so bar peaks reflect all audio (including silent periods as low bars).
+        // Compute combined peak amplitude once — used by both waveform and silence detection.
         let flushSampleCount = max(sys.count, mic.count)
+        var flushPeak: Float = 0
         if flushSampleCount > 0 {
-            var flushPeak: Float = 0
             for s in sys {
                 let a = abs(s)
                 if a > flushPeak { flushPeak = a }
@@ -947,6 +947,9 @@ final class RecordingManager: @unchecked Sendable {
                 let a = abs(s)
                 if a > flushPeak { flushPeak = a }
             }
+
+            // Recording waveform: accumulate peak amplitude into the ring buffer.
+            // Runs before silence detection so bar peaks reflect all audio (including silent periods as low bars).
             if flushPeak > recordingBarCurrentPeak { recordingBarCurrentPeak = flushPeak }
             recordingBarSampleCount += flushSampleCount
             while recordingBarSampleCount >= Self.recordingBarSamplesPerBar {
@@ -958,17 +961,9 @@ final class RecordingManager: @unchecked Sendable {
             }
         }
 
-        // Silence detection: measure peak amplitude across both sources
+        // Silence detection: use the already-computed peak amplitude
         if silenceEnabled {
-            var peak: Float = 0
-            for s in sys {
-                let a = abs(s)
-                if a > peak { peak = a }
-            }
-            for s in mic {
-                let a = abs(s)
-                if a > peak { peak = a }
-            }
+            let peak = flushPeak
 
             if peak < silenceThresholdLocal {
                 silenceSampleCount += max(sys.count, mic.count)

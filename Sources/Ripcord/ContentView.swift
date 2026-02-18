@@ -149,17 +149,14 @@ struct ContentView: View {
         case .buffering:
             let fill = manager.bufferFillSeconds
             let cap = manager.bufferDurationSeconds
-            if fill >= cap {
-                return "Buffering (Full - \(formatTime(cap)))"
-            } else {
-                return "Buffering (\(formatTime(fill)) / \(formatTime(cap)))"
-            }
+            return fill >= cap
+                ? "Buffering (Full - \(formatTime(cap)))"
+                : "Buffering (\(formatTime(fill)) / \(formatTime(cap)))"
         case .recording:
             let elapsed = formatTime(Int(manager.recordingElapsed))
-            if manager.isSilencePaused {
-                return "Recording (\(elapsed)) - Silence"
-            }
-            return "Recording (\(elapsed))"
+            return manager.isSilencePaused
+                ? "Recording (\(elapsed)) - Silence"
+                : "Recording (\(elapsed))"
         case .error(let msg):
             return "Error: \(msg)"
         }
@@ -299,7 +296,7 @@ struct ContentView: View {
                 .font(.caption)
                 .padding(.horizontal, 4)
                 .padding(.vertical, 3)
-                .background(RoundedRectangle(cornerRadius: 4).fill(.white))
+                .background(RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .textBackgroundColor)))
                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
 
             let suggestions = manager.nameSuggestions(for: manager.recordingName)
@@ -553,7 +550,7 @@ private struct RecordingRowView: View {
                                 .font(.caption)
                                 .padding(.horizontal, 4)
                                 .padding(.vertical, 2)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(.white))
+                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .textBackgroundColor)))
                                 .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
                                 .onExitCommand { renamingURL = nil }
                             }
