@@ -104,8 +104,16 @@ cmd_prepare() {
             done < "$list_file"
         done
 
-        python3 "$SCRIPTS/ami_to_rttm.py" "$ami_anno" "$ami_rttm" "${meetings[@]}"
-        echo "  -> $(ls "$ami_rttm"/*.rttm 2>/dev/null | wc -l | tr -d ' ') RTTM files in $ami_rttm/"
+        local existing_rttm=0
+        for m in "${meetings[@]}"; do
+            [[ -f "$ami_rttm/${m}.rttm" ]] && existing_rttm=$(( existing_rttm + 1 ))
+        done
+        if [[ "$existing_rttm" -eq "${#meetings[@]}" ]]; then
+            echo "  -> RTTM files already exist ($existing_rttm files), skipping conversion."
+        else
+            python3 "$SCRIPTS/ami_to_rttm.py" "$ami_anno" "$ami_rttm" "${meetings[@]}"
+            echo "  -> $(ls "$ami_rttm"/*.rttm 2>/dev/null | wc -l | tr -d ' ') RTTM files in $ami_rttm/"
+        fi
     else
         echo "  AMI annotations not found, skipping. Run 'download' first."
     fi
@@ -122,8 +130,12 @@ cmd_prepare() {
     if [[ "$ihm_count" -gt 0 ]]; then
         echo
         echo "--- Building Tier 2 stereo test files from AMI IHM ---"
-        mkdir -p "$DATA/ami/stereo"
-        python3 "$SCRIPTS/ami_build_stereo.py" "$DATA/ami/audio" "$DATA/ami/stereo"
+        if [[ -d "$DATA/ami/stereo" ]] && ls "$DATA/ami/stereo"/*.wav "$DATA/ami/stereo"/*.m4a &>/dev/null 2>&1; then
+            echo "  -> Stereo files already exist in $DATA/ami/stereo/, skipping."
+        else
+            mkdir -p "$DATA/ami/stereo"
+            python3 "$SCRIPTS/ami_build_stereo.py" "$DATA/ami/audio" "$DATA/ami/stereo"
+        fi
     fi
 
     echo
