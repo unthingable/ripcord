@@ -1,0 +1,8 @@
+# AMI quick regression subset
+# 5 meetings: one from each test group, picking shorter sub-meetings
+# Covers Edinburgh (ES), IDIAP (IS), and TNO (TS) recording sites
+ES2004a
+ES2014a
+IS1009a
+TS3003a
+TS3007a

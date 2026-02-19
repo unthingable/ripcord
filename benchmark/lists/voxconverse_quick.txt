@@ -1,0 +1,8 @@
+# VoxConverse dev set - quick regression subset
+# 5 clips selected for variety: different sizes, speaker counts, complexity
+# RTTM file size used as proxy for clip length/complexity
+afjiv
+akthc
+blwmj
+dhorc
+ehpau

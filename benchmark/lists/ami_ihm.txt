@@ -1,0 +1,15 @@
+# AMI meetings to download individual headset mics for (Tier 2 channel-aware testing)
+# 3 groups: one from each recording site
+# Each has 4 sub-meetings x 4 headset channels = 48 WAV files total
+ES2004a
+ES2004b
+ES2004c
+ES2004d
+IS1009a
+IS1009b
+IS1009c
+IS1009d
+TS3003a
+TS3003b
+TS3003c
+TS3003d
