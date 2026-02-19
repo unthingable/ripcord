@@ -10,6 +10,7 @@
 #   ./benchmark.sh run [--quick] [dataset]             Run transcription on benchmarks
 #   ./benchmark.sh score [dataset]                     Compute DER scores
 #   ./benchmark.sh compress [--force]                  Transcode WAV->M4A to save space
+#   ./benchmark.sh sweep [options]                     Parameter sweep for diarization tuning
 #   ./benchmark.sh all [--quick] [--compress]          Download, prepare, compress, run, score
 #
 # Datasets: ami, voxconverse, all (default: all)
@@ -407,6 +408,24 @@ cmd_score() {
     fi
 }
 
+# ─── sweep ───────────────────────────────────────────────────────────────────
+
+cmd_sweep() {
+    if [[ -z "$TRANSCRIBE" ]]; then
+        echo "ERROR: Cannot find 'transcribe' binary."
+        echo "  Build it first: make build"
+        echo "  Or set TRANSCRIBE_BIN=/path/to/transcribe"
+        exit 1
+    fi
+
+    python3 "$SCRIPTS/sweep.py" \
+        --transcribe "$TRANSCRIBE" \
+        --data-dir "$DATA" \
+        --results-dir "$RESULTS" \
+        --lists-dir "$LISTS" \
+        "$@"
+}
+
 # ─── all ─────────────────────────────────────────────────────────────────────
 
 cmd_all() {
@@ -449,6 +468,7 @@ case "$cmd" in
     run)      cmd_run "$@" ;;
     score)    cmd_score "$@" ;;
     compress) cmd_compress "$@" ;;
+    sweep)    cmd_sweep "$@" ;;
     all)      cmd_all "$@" ;;
     *)        usage ;;
 esac

@@ -109,10 +109,41 @@ arbitrary labels (SPEAKER_00, etc.) while references use participant IDs.
 | `compress [--force]`                 | Transcode WAV→M4A (AAC) to save ~10x disk space (macOS) |
 | `run [--quick] [dataset]`            | Transcribe with ripcord; accepts `.m4a` or `.wav`        |
 | `score [dataset]`                    | Compute DER scores                                       |
+| `sweep [options]`                    | Parameter sweep for diarization tuning                   |
 | `all [--quick] [--compress]`         | Run the full pipeline in sequence                        |
 
 > **Note:** `compress` uses `afconvert`, which ships with macOS. This is fine since
 > Ripcord is a macOS application.
+
+## Parameter Sweep
+
+The `sweep` command runs a two-stage parameter sweep to find optimal diarization settings:
+
+```bash
+# Preview what will run (no transcriptions)
+./benchmark.sh sweep --dry-run
+
+# Smoke test: run 2 combos on VoxConverse
+./benchmark.sh sweep --stage 1 --max-combos 2
+
+# Full Stage 1: coarse sweep + focused grid on VoxConverse (~10 hours)
+./benchmark.sh sweep --stage 1
+
+# Stage 2: validate top 5 combos on AMI (~8 hours)
+./benchmark.sh sweep --stage 2
+
+# Both stages
+./benchmark.sh sweep
+```
+
+**Stage 1** (VoxConverse only): One-at-a-time sweeps of `--sensitivity`, `--speech-threshold`,
+`--min-segment`, and `--min-gap`, then a focused grid of the top-2 values per parameter.
+
+**Stage 2** (both datasets): Runs the top 5 combos from Stage 1 on AMI and ranks by
+weighted DER (0.8 × VoxConverse + 0.2 × AMI).
+
+Results are saved to `results/sweep/` and the sweep is resume-friendly — kill and restart
+without losing progress.
 
 ## Overriding the Transcribe Binary
 
