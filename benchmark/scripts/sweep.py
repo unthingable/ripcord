@@ -108,13 +108,18 @@ def run_transcription(transcribe_bin, audio_path, output_json, cli_flags):
     return True, ""
 
 
+def log_msg(msg):
+    """Print a message and flush immediately (needed for parallel workers)."""
+    print(msg, flush=True)
+
+
 def run_combo_on_dataset(
     transcribe_bin, params, dataset_name, audio_dir, ref_dir,
     results_base, file_list, audio_suffix="",
 ):
     """Run a parameter combo on a dataset.
 
-    Returns (combo_id, result_tuple, log_lines) where result_tuple is
+    Returns (combo_id, result_tuple) where result_tuple is
     (der, missed, fa, conf, ref_total) or None.
     """
     cid = combo_id(params)
@@ -123,7 +128,6 @@ def run_combo_on_dataset(
 
     cli_flags = params_to_cli_flags(params)
     audio_suffixes = [audio_suffix] if audio_suffix else [""]
-    log = []
 
     total_missed = 0.0
     total_fa = 0.0
@@ -143,24 +147,22 @@ def run_combo_on_dataset(
         if not os.path.isfile(out_rttm):
             audio_path = find_audio_file(audio_dir, name, audio_suffixes)
             if audio_path is None:
-                log.append(f"    {name}: audio not found, skipping")
+                log_msg(f"  [{cid}] {name}: audio not found, skipping")
                 continue
 
-            log.append(f"    {name}: transcribing...")
+            log_msg(f"  [{cid}] {name}: transcribing...")
             ok, stderr = run_transcription(transcribe_bin, audio_path, out_json, cli_flags)
             if not ok:
-                log.append(f"    ERROR: transcribe failed for {audio_path}")
+                log_msg(f"  [{cid}] ERROR: transcribe failed for {audio_path}")
                 if stderr:
                     for line in stderr.strip().split("\n")[:5]:
-                        log.append(f"      {line}")
+                        log_msg(f"    {line}")
                 continue
 
             # Convert JSON to RTTM
             lines = json_to_rttm(out_json)
             with open(out_rttm, "w") as f:
                 f.write("\n".join(lines) + "\n" if lines else "")
-        else:
-            log.append(f"    {name}: already processed")
 
         # Score
         ref_segs = parse_rttm(ref_rttm)
@@ -176,19 +178,20 @@ def run_combo_on_dataset(
         scored_files += 1
 
     if total_ref == 0:
-        return cid, None, log
+        return cid, None
 
     overall_der = (total_missed + total_fa + total_conf) / total_ref
-    return cid, (overall_der, total_missed, total_fa, total_conf, total_ref), log
+    return cid, (overall_der, total_missed, total_fa, total_conf, total_ref)
 
 
 def _run_combo_worker(args_tuple):
     """Worker function for parallel execution. Unpacks args and calls run_combo_on_dataset."""
     transcribe_bin, params, dataset_name, audio_dir, ref_dir, results_base, file_list, audio_suffix = args_tuple
-    return params, *run_combo_on_dataset(
+    cid, result = run_combo_on_dataset(
         transcribe_bin, params, dataset_name, audio_dir, ref_dir,
         results_base, file_list, audio_suffix,
     )
+    return params, cid, result
 
 
 def run_combos_parallel(transcribe_bin, combos, dataset_name, audio_dir, ref_dir,
@@ -197,21 +200,19 @@ def run_combos_parallel(transcribe_bin, combos, dataset_name, audio_dir, ref_dir
     results = []
 
     if workers <= 1:
-        # Sequential: print progress inline
+        # Sequential
         for i, params in enumerate(combos, 1):
             cid = combo_id(params)
-            print(f"[{i}/{len(combos)}] {cid}")
-            print(f"  Params: {format_params(params)}")
+            print(f"[{i}/{len(combos)}] {cid}", flush=True)
+            print(f"  Params: {format_params(params)}", flush=True)
 
             t0 = time.time()
-            _, result, log = run_combo_on_dataset(
+            _, result = run_combo_on_dataset(
                 transcribe_bin, params, dataset_name,
                 audio_dir, ref_dir, sweep_dir, file_list, audio_suffix,
             )
             elapsed = time.time() - t0
 
-            for line in log:
-                print(line)
             if result is not None:
                 der, miss, fa, conf, ref_s = result
                 results.append((params, result))
@@ -220,9 +221,9 @@ def run_combos_parallel(transcribe_bin, combos, dataset_name, audio_dir, ref_dir
                 print(f"  No results (scoring failed) [{elapsed:.0f}s]")
             print()
     else:
-        # Parallel: submit all combos, print as they complete
-        print(f"  Running {len(combos)} combos with {workers} workers...")
-        print()
+        # Parallel: submit all combos, per-file progress prints from workers
+        print(f"  Running {len(combos)} combos with {workers} workers...", flush=True)
+        print(flush=True)
         work_items = [
             (transcribe_bin, params, dataset_name, audio_dir, ref_dir, sweep_dir, file_list, audio_suffix)
             for params in combos
@@ -235,17 +236,13 @@ def run_combos_parallel(transcribe_bin, combos, dataset_name, audio_dir, ref_dir
             }
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
-                params, cid, result, log = future.result()
-                # In parallel mode, only print errors/transcriptions, not "already processed"
-                for line in log:
-                    if "already processed" not in line:
-                        print(line)
+                params, cid, result = future.result()
                 if result is not None:
                     der, miss, fa, conf, ref_s = result
                     results.append((params, result))
-                    print(f"[{completed}/{len(combos)}] {cid}: DER={der:.1%} (miss={miss:.1f}s fa={fa:.1f}s conf={conf:.1f}s)")
+                    print(f"[{completed}/{len(combos)}] {cid}: DER={der:.1%} (miss={miss:.1f}s fa={fa:.1f}s conf={conf:.1f}s)", flush=True)
                 else:
-                    print(f"[{completed}/{len(combos)}] {cid}: no results")
+                    print(f"[{completed}/{len(combos)}] {cid}: no results", flush=True)
         print()
 
     return results
