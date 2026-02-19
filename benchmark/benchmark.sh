@@ -130,7 +130,7 @@ cmd_prepare() {
     if [[ "$ihm_count" -gt 0 ]]; then
         echo
         echo "--- Building Tier 2 stereo test files from AMI IHM ---"
-        if [[ -d "$DATA/ami/stereo" ]] && ls "$DATA/ami/stereo"/*.wav "$DATA/ami/stereo"/*.m4a &>/dev/null 2>&1; then
+        if [[ -d "$DATA/ami/stereo" ]] && { ls "$DATA/ami/stereo"/*.m4a &>/dev/null || ls "$DATA/ami/stereo"/*.wav &>/dev/null; }; then
             echo "  -> Stereo files already exist in $DATA/ami/stereo/, skipping."
         else
             mkdir -p "$DATA/ami/stereo"
@@ -193,7 +193,7 @@ cmd_compress() {
     done < <(find "$DATA/ami/audio" -maxdepth 1 -name '*.Headset-[0-9].wav' -print0 2>/dev/null)
 
     local stereo_has_files=false
-    if [[ -d "$DATA/ami/stereo" ]] && ls "$DATA/ami/stereo"/*.m4a "$DATA/ami/stereo"/*.wav &>/dev/null 2>&1; then
+    if [[ -d "$DATA/ami/stereo" ]] && { ls "$DATA/ami/stereo"/*.m4a &>/dev/null || ls "$DATA/ami/stereo"/*.wav &>/dev/null; }; then
         stereo_has_files=true
     fi
 
