@@ -13,19 +13,27 @@ make build
 # Run everything (download ~300MB, transcribe, score)
 ./benchmark.sh all --quick
 
+# With compression to save ~10x disk space (macOS only, uses afconvert)
+./benchmark.sh all --quick --compress
+
 # Or step by step:
 ./benchmark.sh download --quick   # ~300MB: 5 AMI meetings + 5 VoxConverse clips
 ./benchmark.sh prepare            # Convert AMI annotations to RTTM
-./benchmark.sh run --quick        # Transcribe with ripcord
+./benchmark.sh compress           # Transcode WAV->M4A (~30MB->3MB per file)
+./benchmark.sh run --quick        # Transcribe with ripcord (accepts .m4a or .wav)
 ./benchmark.sh score              # Compute DER
 ```
 
 ## Modes
 
-| Mode      | Data Size | AMI Meetings | VoxConverse Clips | Use Case                    |
-|-----------|-----------|--------------|-------------------|-----------------------------|
-| `--quick` | ~300 MB   | 5            | 5                 | Dev regression, fast CI     |
-| `--full`  | ~1.2 GB   | 20 + IHM     | ~216              | Thorough evaluation, papers |
+| Mode      | Data Size          | AMI Meetings | VoxConverse Clips | Use Case                    |
+|-----------|--------------------|--------------|-------------------|-----------------------------|
+| `--quick` | ~300 MB (~30 MB compressed) | 5  | 5                 | Dev regression, fast CI     |
+| `--full`  | ~1.2 GB (~120 MB compressed) | 20 + IHM | ~216        | Thorough evaluation, papers |
+
+Add `--compress` to any `all` invocation to transcode WAV files to M4A (AAC) after
+download, saving ~10x disk space. Requires macOS (`afconvert` ships with the OS).
+The `run` command accepts both `.m4a` and `.wav` automatically.
 
 ## Datasets
 
@@ -91,6 +99,20 @@ benchmark/
 
 The scorer uses optimal speaker label mapping since our system produces
 arbitrary labels (SPEAKER_00, etc.) while references use participant IDs.
+
+## Commands
+
+| Command                              | Description                                              |
+|--------------------------------------|----------------------------------------------------------|
+| `download [--quick\|--full]`         | Download benchmark datasets                              |
+| `prepare`                            | Convert AMI annotations to RTTM; build stereo test files |
+| `compress [--force]`                 | Transcode WAV→M4A (AAC) to save ~10x disk space (macOS) |
+| `run [--quick] [dataset]`            | Transcribe with ripcord; accepts `.m4a` or `.wav`        |
+| `score [dataset]`                    | Compute DER scores                                       |
+| `all [--quick] [--compress]`         | Run the full pipeline in sequence                        |
+
+> **Note:** `compress` uses `afconvert`, which ships with macOS. This is fine since
+> Ripcord is a macOS application.
 
 ## Overriding the Transcribe Binary
 

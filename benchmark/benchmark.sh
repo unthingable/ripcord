@@ -5,11 +5,12 @@
 # Downloads benchmark datasets, runs transcription, and computes DER scores.
 #
 # Usage:
-#   ./benchmark.sh download [--quick|--full]    Download benchmark data
-#   ./benchmark.sh prepare                       Convert annotations to RTTM
-#   ./benchmark.sh run [--quick] [dataset]       Run transcription on benchmarks
-#   ./benchmark.sh score [dataset]               Compute DER scores
-#   ./benchmark.sh all [--quick]                 Download, prepare, run, and score
+#   ./benchmark.sh download [--quick|--full]          Download benchmark data
+#   ./benchmark.sh prepare                             Convert annotations to RTTM
+#   ./benchmark.sh run [--quick] [dataset]             Run transcription on benchmarks
+#   ./benchmark.sh score [dataset]                     Compute DER scores
+#   ./benchmark.sh compress [--force]                  Transcode WAV->M4A to save space
+#   ./benchmark.sh all [--quick] [--compress]          Download, prepare, compress, run, score
 #
 # Datasets: ami, voxconverse, all (default: all)
 #
@@ -129,6 +130,109 @@ cmd_prepare() {
     echo "Preparation complete."
 }
 
+# ─── compress ────────────────────────────────────────────────────────────────
+
+cmd_compress() {
+    local force=false
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --force) force=true; shift ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
+
+    if ! command -v afconvert &>/dev/null; then
+        echo "ERROR: 'afconvert' not found. This command requires macOS."
+        exit 1
+    fi
+
+    local total_files=0
+    local total_saved=0
+
+    compress_wav() {
+        local wav="$1"
+        local m4a="${wav%.wav}.m4a"
+
+        local before
+        before=$(stat -f%z "$wav" 2>/dev/null || stat -c%s "$wav" 2>/dev/null || echo 0)
+
+        afconvert -f m4af -d aac -b 48000 "$wav" "$m4a"
+
+        if [[ -f "$m4a" && -s "$m4a" ]]; then
+            local after
+            after=$(stat -f%z "$m4a" 2>/dev/null || stat -c%s "$m4a" 2>/dev/null || echo 0)
+            local saved=$(( before - after ))
+            local before_mb=$(( before / 1048576 ))
+            local after_mb=$(( after / 1048576 ))
+            echo "  $(basename "$wav") -> .m4a (${before_mb}MB -> ${after_mb}MB)"
+            rm -f "$wav"
+            total_files=$(( total_files + 1 ))
+            total_saved=$(( total_saved + saved ))
+        else
+            echo "  ERROR: failed to create $m4a, keeping WAV"
+            rm -f "$m4a"
+        fi
+    }
+
+    # Check for IHM WAV files and stereo directory
+    local ihm_wavs=()
+    while IFS= read -r -d '' f; do
+        ihm_wavs+=("$f")
+    done < <(find "$DATA/ami/audio" -maxdepth 1 -name '*.Headset-[0-9].wav' -print0 2>/dev/null)
+
+    local stereo_has_files=false
+    if [[ -d "$DATA/ami/stereo" ]] && ls "$DATA/ami/stereo"/*.m4a "$DATA/ami/stereo"/*.wav &>/dev/null 2>&1; then
+        stereo_has_files=true
+    fi
+
+    if [[ ${#ihm_wavs[@]} -gt 0 ]] && ! $stereo_has_files; then
+        if ! $force; then
+            echo "WARNING: IHM WAV files found but stereo not yet built."
+            echo "  Run 'benchmark.sh prepare' first, or pass --force to compress IHM files anyway."
+        fi
+    fi
+
+    # AMI SDM (Mix-Headset) WAVs
+    if [[ -d "$DATA/ami/audio" ]]; then
+        local sdm_found=false
+        for wav in "$DATA/ami/audio"/*.Mix-Headset.wav; do
+            [[ -f "$wav" ]] || continue
+            sdm_found=true
+            compress_wav "$wav"
+        done
+        $sdm_found || true
+    fi
+
+    # AMI IHM WAVs — only if stereo is built or --force
+    if [[ ${#ihm_wavs[@]} -gt 0 ]]; then
+        if $stereo_has_files || $force; then
+            for wav in "${ihm_wavs[@]}"; do
+                compress_wav "$wav"
+            done
+        fi
+    fi
+
+    # VoxConverse WAVs
+    if [[ -d "$DATA/voxconverse/audio" ]]; then
+        for wav in "$DATA/voxconverse/audio"/*.wav; do
+            [[ -f "$wav" ]] || continue
+            compress_wav "$wav"
+        done
+    fi
+
+    # Stereo WAVs (already built from IHM)
+    if [[ -d "$DATA/ami/stereo" ]]; then
+        for wav in "$DATA/ami/stereo"/*.wav; do
+            [[ -f "$wav" ]] || continue
+            compress_wav "$wav"
+        done
+    fi
+
+    echo
+    local saved_mb=$(( total_saved / 1048576 ))
+    echo "Compression complete: $total_files file(s) compressed, ~${saved_mb}MB saved."
+}
+
 # ─── run ─────────────────────────────────────────────────────────────────────
 
 cmd_run() {
@@ -166,7 +270,10 @@ cmd_run() {
         echo "--- Transcribing AMI meetings ---"
         while IFS= read -r meeting; do
             [[ "$meeting" =~ ^#.*$ || -z "$meeting" ]] && continue
-            local wav="$ami_audio/${meeting}.Mix-Headset.wav"
+            local audio=""
+            for ext in m4a wav; do
+                [[ -f "$ami_audio/${meeting}.Mix-Headset.${ext}" ]] && audio="$ami_audio/${meeting}.Mix-Headset.${ext}" && break
+            done
             local out_json="$ami_sys/${meeting}.json"
             local out_rttm="$ami_sys/${meeting}.rttm"
 
@@ -175,13 +282,13 @@ cmd_run() {
                 continue
             fi
 
-            if [[ ! -f "$wav" ]]; then
+            if [[ -z "$audio" ]]; then
                 echo "  $meeting: audio not found, skipping"
                 continue
             fi
 
             echo "  $meeting: transcribing..."
-            "$TRANSCRIBE" "$wav" --format json -o "$out_json" --force 2>&1 | \
+            "$TRANSCRIBE" "$audio" --format json -o "$out_json" --force 2>&1 | \
                 sed 's/^/    /'
 
             # Convert to RTTM
@@ -210,10 +317,13 @@ cmd_run() {
                 run_voxconverse_file "$vc_audio" "$vc_sys" "$clip"
             done < "$vc_list"
         else
-            for wav in "$vc_audio"/*.wav; do
-                [[ -f "$wav" ]] || continue
-                local clip
-                clip=$(basename "$wav" .wav)
+            for audio_file in "$vc_audio"/*.m4a "$vc_audio"/*.wav; do
+                [[ -f "$audio_file" ]] || continue
+                local clip ext
+                ext="${audio_file##*.}"
+                clip=$(basename "$audio_file" ".$ext")
+                # Skip WAV if an M4A for same clip already handled
+                [[ "$ext" == "wav" && -f "$vc_audio/${clip}.m4a" ]] && continue
                 run_voxconverse_file "$vc_audio" "$vc_sys" "$clip"
             done
         fi
@@ -225,7 +335,10 @@ cmd_run() {
 
 run_voxconverse_file() {
     local audio_dir="$1" sys_dir="$2" clip="$3"
-    local wav="$audio_dir/${clip}.wav"
+    local audio=""
+    for ext in m4a wav; do
+        [[ -f "$audio_dir/${clip}.${ext}" ]] && audio="$audio_dir/${clip}.${ext}" && break
+    done
     local out_json="$sys_dir/${clip}.json"
     local out_rttm="$sys_dir/${clip}.rttm"
 
@@ -234,13 +347,13 @@ run_voxconverse_file() {
         return
     fi
 
-    if [[ ! -f "$wav" ]]; then
+    if [[ -z "$audio" ]]; then
         echo "  $clip: audio not found, skipping"
         return
     fi
 
     echo "  $clip: transcribing..."
-    "$TRANSCRIBE" "$wav" --format json -o "$out_json" --force 2>&1 | \
+    "$TRANSCRIBE" "$audio" --format json -o "$out_json" --force 2>&1 | \
         sed 's/^/    /'
     python3 "$SCRIPTS/json_to_rttm.py" "$out_json" "$out_rttm"
 }
@@ -286,7 +399,16 @@ cmd_score() {
 
 cmd_all() {
     local mode="--quick"
-    [[ "${1:-}" == "--full" ]] && mode="--full"
+    local do_compress=false
+
+    while [[ $# -gt 0 ]]; do
+        case "$1" in
+            --full)     mode="--full"; shift ;;
+            --quick)    mode="--quick"; shift ;;
+            --compress) do_compress=true; shift ;;
+            *) echo "Unknown option: $1"; exit 1 ;;
+        esac
+    done
 
     local quick_flag=""
     [[ "$mode" == "--quick" ]] && quick_flag="--quick"
@@ -295,6 +417,10 @@ cmd_all() {
     echo
     cmd_prepare
     echo
+    if $do_compress; then
+        cmd_compress
+        echo
+    fi
     cmd_run $quick_flag
     echo
     cmd_score
@@ -310,6 +436,7 @@ case "$cmd" in
     prepare)  cmd_prepare "$@" ;;
     run)      cmd_run "$@" ;;
     score)    cmd_score "$@" ;;
+    compress) cmd_compress "$@" ;;
     all)      cmd_all "$@" ;;
     *)        usage ;;
 esac
