@@ -236,8 +236,10 @@ def run_combos_parallel(transcribe_bin, combos, dataset_name, audio_dir, ref_dir
             for future in concurrent.futures.as_completed(futures):
                 completed += 1
                 params, cid, result, log = future.result()
+                # In parallel mode, only print errors/transcriptions, not "already processed"
                 for line in log:
-                    print(line)
+                    if "already processed" not in line:
+                        print(line)
                 if result is not None:
                     der, miss, fa, conf, ref_s = result
                     results.append((params, result))
