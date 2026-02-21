@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.7.0
+
+- Apply recording name as post-recording rename instead of baking into filename at start
+- Tint menubar icon red while recording
+- Add parameter sweep command for diarization tuning
+- Add diarization benchmark suite with AMI and VoxConverse datasets
+- Add compress command to transcode benchmark WAV files to M4A
+- Make prepare command idempotent
+- Fix stereo detection: check .m4a and .wav separately with OR logic
+- Fix sweep output: print per-file progress with flush for parallel workers
+
 ## 0.6.1
 
 - Fix dark mode: replace hardcoded white TextField backgrounds with system color
