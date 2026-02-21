@@ -372,20 +372,13 @@ final class RecordingManager: @unchecked Sendable {
             .replacingOccurrences(of: "T", with: "_")
             .prefix(19)
 
-        let sanitizedName = Self.sanitizeRecordingName(recordingName)
         var parts: [String] = []
         let trimmedPrefix = filePrefix.trimmingCharacters(in: .whitespaces)
         if !trimmedPrefix.isEmpty {
             parts.append(trimmedPrefix)
         }
         parts.append(String(timestamp))
-        if !sanitizedName.isEmpty {
-            parts.append(sanitizedName)
-        }
         let filename = parts.joined(separator: "_") + ".\(outputFormat.fileExtension)"
-
-        addToNameHistory(sanitizedName)
-        recordingName = ""
 
         let outputDir = outputDirectory
 
@@ -571,6 +564,25 @@ final class RecordingManager: @unchecked Sendable {
 
             self.writer = nil
             self.writeError = nil
+        }
+
+        // Apply recording name (user may have typed it during recording)
+        let sanitizedName = Self.sanitizeRecordingName(recordingName)
+        addToNameHistory(sanitizedName)
+        recordingName = ""
+
+        if !sanitizedName.isEmpty, case .success(var info) = result {
+            let ext = info.url.pathExtension
+            let stem = info.url.deletingPathExtension().lastPathComponent
+            let newFilename = stem + "_" + sanitizedName + "." + ext
+            let newURL = info.url.deletingLastPathComponent().appendingPathComponent(newFilename)
+            do {
+                try FileManager.default.moveItem(at: info.url, to: newURL)
+                info.url = newURL
+                result = .success(info)
+            } catch {
+                // Rename failed; keep original filename
+            }
         }
 
         // Update state based on result
