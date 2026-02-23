@@ -525,51 +525,61 @@ private struct RecordingRowView: View {
     @Binding var pendingTranscriptionConfig: TranscriptionConfig
 
     @State private var isHovered = false
+    @FocusState private var renameFieldFocused: Bool
 
     var body: some View {
         HStack {
-            Button(action: {
-                NSWorkspace.shared.activateFileViewerSelecting([recording.url])
-            }) {
+            if renamingURL == recording.url {
+                let stem = recording.url.deletingPathExtension().lastPathComponent
+                let (base, _) = RecordingManager.parseFilenameParts(stem)
                 HStack {
                     VStack(alignment: .leading) {
-                        if renamingURL == recording.url {
-                            let stem = recording.url.deletingPathExtension().lastPathComponent
-                            let (base, _) = RecordingManager.parseFilenameParts(stem)
-                            HStack(spacing: 0) {
-                                Text(base + "_")
-                                    .font(.caption)
-                                    .lineLimit(1)
-                                    .truncationMode(.middle)
-                                    .fixedSize()
-                                TextField("name", text: $renameText, onCommit: {
-                                    manager.renameRecording(recording, to: renameText)
-                                    renamingURL = nil
-                                })
-                                .textFieldStyle(.plain)
-                                .font(.caption)
-                                .padding(.horizontal, 4)
-                                .padding(.vertical, 2)
-                                .background(RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .textBackgroundColor)))
-                                .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
-                                .onExitCommand { renamingURL = nil }
-                            }
-                            .lineLimit(1)
-                        } else {
-                            Text(recording.filename)
+                        HStack(spacing: 0) {
+                            Text(base + "_")
                                 .font(.caption)
                                 .lineLimit(1)
+                                .truncationMode(.middle)
+                                .fixedSize()
+                            TextField("name", text: $renameText, onCommit: {
+                                manager.renameRecording(recording, to: renameText)
+                                renamingURL = nil
+                            })
+                            .textFieldStyle(.plain)
+                            .font(.caption)
+                            .padding(.horizontal, 4)
+                            .padding(.vertical, 2)
+                            .background(RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .textBackgroundColor)))
+                            .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+                            .focused($renameFieldFocused)
+                            .onExitCommand { renamingURL = nil }
                         }
+                        .lineLimit(1)
+                        .onAppear { renameFieldFocused = true }
                         Text("\(recording.formattedDuration) - \(recording.formattedSize)")
                             .font(.caption2)
                     }
                     Spacer()
                 }
-                .contentShape(Rectangle())
+            } else {
+                Button(action: {
+                    NSWorkspace.shared.activateFileViewerSelecting([recording.url])
+                }) {
+                    HStack {
+                        VStack(alignment: .leading) {
+                            Text(recording.filename)
+                                .font(.caption)
+                                .lineLimit(1)
+                            Text("\(recording.formattedDuration) - \(recording.formattedSize)")
+                                .font(.caption2)
+                        }
+                        Spacer()
+                    }
+                    .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .accessibilityHint("Opens recording in Finder")
+                .help("Show in Finder")
             }
-            .buttonStyle(.plain)
-            .accessibilityHint("Opens recording in Finder")
-            .help("Show in Finder")
 
             if renamingURL != recording.url {
                 HStack(spacing: 6) {

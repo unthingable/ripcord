@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.7.1
+
+- Fix rename text field not accepting spaces (was nested inside a Button)
+- Auto-focus rename text field when entering rename mode
+- Watch output directory for external changes and update recent recordings list
+
 ## 0.7.0
 
 - Apply recording name as post-recording rename instead of baking into filename at start

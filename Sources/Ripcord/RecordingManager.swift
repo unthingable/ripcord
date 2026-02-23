@@ -158,6 +158,10 @@ final class RecordingManager: @unchecked Sendable {
     private var elapsedTimer: Timer?
     private var waveformTimer: Timer?
 
+    // Directory monitor for recent recordings
+    private var directoryMonitorSource: DispatchSourceFileSystemObject?
+    private var directoryMonitorFD: Int32 = -1
+
     init() {
         let defaults = UserDefaults.standard
         let defaultDir = FileManager.default.homeDirectoryForCurrentUser
@@ -323,6 +327,7 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         await loadRecentRecordings()
+        await MainActor.run { startDirectoryMonitor() }
 
         if !transcriptionService.modelsReady
             && TranscriptionService.modelsExistOnDisk(config: transcriptionConfig) {
@@ -355,6 +360,30 @@ final class RecordingManager: @unchecked Sendable {
         await MainActor.run {
             recentRecordings = loaded
         }
+    }
+
+    private func startDirectoryMonitor() {
+        stopDirectoryMonitor()
+        let dir = outputDirectory
+        let fd = open(dir.path, O_EVTONLY)
+        guard fd >= 0 else { return }
+        directoryMonitorFD = fd
+        let source = DispatchSource.makeFileSystemObjectSource(
+            fileDescriptor: fd, eventMask: [.write, .delete, .rename], queue: .main
+        )
+        source.setEventHandler { [weak self] in
+            guard let self else { return }
+            Task { await self.loadRecentRecordings() }
+        }
+        source.setCancelHandler { close(fd) }
+        directoryMonitorSource = source
+        source.resume()
+    }
+
+    private func stopDirectoryMonitor() {
+        directoryMonitorSource?.cancel()
+        directoryMonitorSource = nil
+        directoryMonitorFD = -1
     }
 
     private static func audioDuration(url: URL) -> Double? {
@@ -645,6 +674,8 @@ final class RecordingManager: @unchecked Sendable {
     func updateOutputDirectory(_ url: URL) {
         outputDirectory = url
         UserDefaults.standard.set(url.path, forKey: SettingsKey.outputDirectory)
+        startDirectoryMonitor()
+        Task { await loadRecentRecordings() }
     }
 
     func updateTranscriptionEnabled(_ enabled: Bool) {
