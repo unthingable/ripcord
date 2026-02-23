@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.2
+
+- Fix microphone access flickering on audio device changes (e.g. plugging in headphones)
+
 ## 0.7.1
 
 - Fix rename text field not accepting spaces (was nested inside a Button)

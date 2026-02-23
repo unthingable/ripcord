@@ -36,11 +36,6 @@ final class MicrophoneCapture: @unchecked Sendable {
         _isRunning = true
         stateLock.unlock()
 
-        // Re-register config change handler (removed by stop())
-        if configChangeObserver == nil {
-            registerConfigChangeHandler()
-        }
-
         currentDeviceID = deviceID
 
         let inputNode = engine.inputNode
@@ -136,6 +131,11 @@ final class MicrophoneCapture: @unchecked Sendable {
         do {
             engine.prepare()
             try engine.start()
+            // Register observer only after engine is fully running, so we don't
+            // react to config-change notifications triggered by our own startup.
+            if configChangeObserver == nil {
+                registerConfigChangeHandler()
+            }
         } catch {
             engine.inputNode.removeTap(onBus: 0)
             stateLock.lock()
@@ -179,7 +179,7 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     private func handleConfigChange() {
         // Engine has been stopped by the system. Restart if we were running.
-        // Remove observer first to prevent re-entrant config change notifications
+        // Remove observer to prevent re-entrant config change notifications
         // during restart (installing a new tap can trigger another notification).
         if let observer = configChangeObserver {
             NotificationCenter.default.removeObserver(observer)
@@ -193,12 +193,13 @@ final class MicrophoneCapture: @unchecked Sendable {
 
         guard wasRunning else { return }
 
-        // Clean up old tap and engine state before restarting
+        // Clean up old tap and engine state
         engine.inputNode.removeTap(onBus: 0)
         engine.stop()
 
         // Restart the engine, trying the previously selected device first.
-        // start() re-registers the config change observer.
+        // start() re-registers the config change observer only after the engine
+        // is running, so our own startup won't trigger another cycle.
         do {
             try start(deviceID: currentDeviceID)
         } catch {
