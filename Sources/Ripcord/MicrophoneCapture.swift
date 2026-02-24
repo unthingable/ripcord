@@ -35,11 +35,20 @@ final class MicrophoneCapture: @unchecked Sendable {
     private var defaultInputListener: AudioObjectPropertyListenerBlock?
     private var listeningDeviceID: AudioDeviceID = 0
 
-    // Render buffer (grown as needed, accessed only from the IO thread)
+    // Resampling (when device rate != 48 kHz)
+    private var converter: AudioConverterRef?
+    private var deviceSampleRate: Double = 0
+
+    // Buffers (accessed only from the IO thread — pre-allocated to avoid
+    // heap allocations on the real-time audio thread)
     private var renderBuffer = [Float](repeating: 0, count: 8192)
+    private var resampleOutputBuffer = [Float](repeating: 0, count: 16384)
 
     // Captured at start() so the IO callback avoids a data race on onSamples
     private var capturedCallback: (([Float]) -> Void)?
+
+    // Diagnostic: track render errors from the IO thread
+    private var renderErrorCount: Int = 0
 
     var onSamples: (([Float]) -> Void)?
 
@@ -79,8 +88,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         capturedCallback = onSamples
 
         do {
-            let unit = try createAudioUnit(deviceID: effectiveDeviceID)
-            self.audioUnit = unit
+            try setupAudioUnit(deviceID: effectiveDeviceID)
             installDeviceListeners(deviceID: effectiveDeviceID)
         } catch {
             stateLock.lock()
@@ -108,7 +116,7 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     // MARK: - Audio Unit Setup
 
-    private func createAudioUnit(deviceID: AudioDeviceID) throws -> AudioComponentInstance {
+    private func setupAudioUnit(deviceID: AudioDeviceID) throws {
         var desc = AudioComponentDescription(
             componentType: kAudioUnitType_Output,
             componentSubType: kAudioUnitSubType_HALOutput,
@@ -141,23 +149,32 @@ final class MicrophoneCapture: @unchecked Sendable {
             try osCheck(AudioUnitSetProperty(unit, kAudioOutputUnitProperty_CurrentDevice,
                 kAudioUnitScope_Global, 0, &devID, UInt32(MemoryLayout<AudioDeviceID>.size)))
 
-            // Request 48 kHz mono Float32 on the output side of element 1.
-            // The AUHAL's internal converter handles sample-rate conversion
-            // and channel mixing from the device's native format.
-            var outputFormat = AudioStreamBasicDescription(
-                mSampleRate: AudioConstants.sampleRate,
-                mFormatID: kAudioFormatLinearPCM,
-                mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-                mBytesPerPacket: 4,
-                mFramesPerPacket: 1,
-                mBytesPerFrame: 4,
-                mChannelsPerFrame: 1,
-                mBitsPerChannel: 32,
-                mReserved: 0
-            )
+            // Read the device's native format
+            var nativeFormat = AudioStreamBasicDescription()
+            var fmtSize = UInt32(MemoryLayout<AudioStreamBasicDescription>.size)
+            try osCheck(AudioUnitGetProperty(unit, kAudioUnitProperty_StreamFormat,
+                kAudioUnitScope_Input, 1, &nativeFormat, &fmtSize))
+
+            guard nativeFormat.mSampleRate > 0, nativeFormat.mChannelsPerFrame > 0 else {
+                throw DeviceError.formatNotReady
+            }
+            deviceSampleRate = nativeFormat.mSampleRate
+
+            logger.error("Device \(deviceID): native \(nativeFormat.mSampleRate) Hz, \(nativeFormat.mChannelsPerFrame) ch")
+
+            // Set the output side of element 1 to mono Float32 at the DEVICE's
+            // native sample rate. Don't ask the AUHAL to resample — its internal
+            // converter fails (-10863) on some devices (e.g. AirPods HFP at 24 kHz).
+            // We handle resampling to 48 kHz ourselves via AudioConverter.
+            var outputFormat = Self.monoFloat32ASBD(sampleRate: nativeFormat.mSampleRate)
             try osCheck(AudioUnitSetProperty(unit, kAudioUnitProperty_StreamFormat,
                 kAudioUnitScope_Output, 1, &outputFormat,
                 UInt32(MemoryLayout<AudioStreamBasicDescription>.size)))
+
+            // Set up resampler if the device rate differs from our target
+            if nativeFormat.mSampleRate != AudioConstants.sampleRate {
+                try setupResampler(sourceSampleRate: nativeFormat.mSampleRate)
+            }
 
             // Install the input callback
             var callbackStruct = AURenderCallbackStruct(
@@ -169,20 +186,33 @@ final class MicrophoneCapture: @unchecked Sendable {
                 UInt32(MemoryLayout<AURenderCallbackStruct>.size)))
 
             try osCheck(AudioUnitInitialize(unit))
+
+            // Set audioUnit BEFORE starting so the IO callback can use it
+            // from the very first invocation (no race with the IO thread).
+            renderErrorCount = 0
+            self.audioUnit = unit
             try osCheck(AudioOutputUnitStart(unit))
-            return unit
         } catch {
+            self.audioUnit = nil
             AudioComponentInstanceDispose(unit)
             throw error
         }
     }
 
     private func tearDownAudioUnit() {
-        guard let unit = audioUnit else { return }
-        AudioOutputUnitStop(unit)
-        AudioUnitUninitialize(unit)
-        AudioComponentInstanceDispose(unit)
-        audioUnit = nil
+        if let unit = audioUnit {
+            // Nil audioUnit BEFORE stopping so in-flight IO callbacks
+            // early-return via `guard let audioUnit` instead of calling
+            // AudioUnitRender on a unit that's mid-teardown.
+            audioUnit = nil
+            AudioOutputUnitStop(unit)
+            AudioUnitUninitialize(unit)
+            AudioComponentInstanceDispose(unit)
+        }
+        if let converter {
+            AudioConverterDispose(converter)
+            self.converter = nil
+        }
     }
 
     // MARK: - IO Callback
@@ -212,11 +242,129 @@ final class MicrophoneCapture: @unchecked Sendable {
             return AudioUnitRender(audioUnit, ioActionFlags, timeStamp, busNumber, frameCount, &bufferList)
         }
 
-        guard status == noErr else { return status }
+        if status != noErr {
+            renderErrorCount += 1
+            if renderErrorCount == 1 || renderErrorCount % 1000 == 0 {
+                logger.error("AudioUnitRender failed: \(status) (count: \(self.renderErrorCount))")
+            }
+            return status
+        }
 
-        let samples = Array(renderBuffer.prefix(count))
-        capturedCallback?(samples)
+        if converter != nil {
+            if let resampled = resample(frameCount: count) {
+                capturedCallback?(resampled)
+            }
+        } else {
+            // Single allocation for the consumer
+            let samples = Array(renderBuffer.prefix(count))
+            capturedCallback?(samples)
+        }
         return noErr
+    }
+
+    // MARK: - Resampling
+
+    private static func monoFloat32ASBD(sampleRate: Double) -> AudioStreamBasicDescription {
+        AudioStreamBasicDescription(
+            mSampleRate: sampleRate,
+            mFormatID: kAudioFormatLinearPCM,
+            mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
+            mBytesPerPacket: 4,
+            mFramesPerPacket: 1,
+            mBytesPerFrame: 4,
+            mChannelsPerFrame: 1,
+            mBitsPerChannel: 32,
+            mReserved: 0
+        )
+    }
+
+    private func setupResampler(sourceSampleRate: Double) throws {
+        var inputFmt = Self.monoFloat32ASBD(sampleRate: sourceSampleRate)
+        var outputFmt = Self.monoFloat32ASBD(sampleRate: AudioConstants.sampleRate)
+
+        var conv: AudioConverterRef?
+        let err = AudioConverterNew(&inputFmt, &outputFmt, &conv)
+        guard err == noErr, let conv else {
+            throw DeviceError.osFailed(err)
+        }
+        self.converter = conv
+    }
+
+    // Sentinel returned by the converter data proc when all input has been
+    // consumed.  Must not collide with a real OSStatus error.  Using 1
+    // (a positive value no CoreAudio API returns) is the pattern used in
+    // Apple sample code.
+    private static let kNoMoreData: OSStatus = 1
+
+    /// Resample from renderBuffer (frameCount samples at deviceSampleRate)
+    /// to 48 kHz.  Reads renderBuffer directly to avoid intermediate copies.
+    private func resample(frameCount: Int) -> [Float]? {
+        guard let converter else { return nil }
+        guard deviceSampleRate > 0 else { return nil }
+
+        let ratio = AudioConstants.sampleRate / deviceSampleRate
+        let outputFrameCount = Int(Double(frameCount) * ratio) + 1
+
+        if resampleOutputBuffer.count < outputFrameCount {
+            resampleOutputBuffer = [Float](repeating: 0, count: outputFrameCount)
+        }
+
+        let inputByteSize = frameCount * MemoryLayout<Float>.size
+        var ioOutputDataPacketSize = UInt32(outputFrameCount)
+
+        let err = renderBuffer.withUnsafeMutableBytes { inputPtr in
+            resampleOutputBuffer.withUnsafeMutableBytes { outputPtr -> OSStatus in
+                var inputBufList = AudioBufferList(
+                    mNumberBuffers: 1,
+                    mBuffers: AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(inputByteSize),
+                        mData: inputPtr.baseAddress
+                    )
+                )
+
+                var outputBufList = AudioBufferList(
+                    mNumberBuffers: 1,
+                    mBuffers: AudioBuffer(
+                        mNumberChannels: 1,
+                        mDataByteSize: UInt32(outputFrameCount * MemoryLayout<Float>.size),
+                        mData: outputPtr.baseAddress
+                    )
+                )
+
+                return AudioConverterFillComplexBuffer(
+                    converter,
+                    { (_, ioNumberDataPackets, ioData, _, inUserData) -> OSStatus in
+                        guard let userData = inUserData else {
+                            ioNumberDataPackets.pointee = 0
+                            return 1  // kNoMoreData
+                        }
+                        let srcBufList = userData.assumingMemoryBound(to: AudioBufferList.self)
+                        let available = srcBufList.pointee.mBuffers.mDataByteSize
+                        if available == 0 {
+                            ioNumberDataPackets.pointee = 0
+                            return 1  // kNoMoreData
+                        }
+                        ioData.pointee.mBuffers.mData = srcBufList.pointee.mBuffers.mData
+                        ioData.pointee.mBuffers.mDataByteSize = available
+                        ioNumberDataPackets.pointee = available / 4
+                        srcBufList.pointee.mBuffers.mDataByteSize = 0
+                        srcBufList.pointee.mBuffers.mData = nil
+                        return noErr
+                    },
+                    &inputBufList,
+                    &ioOutputDataPacketSize,
+                    &outputBufList,
+                    nil
+                )
+            }
+        }
+
+        guard err == noErr || err == Self.kNoMoreData else { return nil }
+
+        let actualCount = Int(ioOutputDataPacketSize)
+        guard actualCount > 0 else { return nil }
+        return Array(resampleOutputBuffer.prefix(actualCount))
     }
 
     // MARK: - Device Change Handling

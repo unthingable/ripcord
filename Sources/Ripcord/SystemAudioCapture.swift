@@ -193,6 +193,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     private func restartAfterRouteChange() async {
         // Full teardown runs on the cooperative thread pool, not main.
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
+            _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
             _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
             self.ioProcID = nil
         }
@@ -295,6 +296,10 @@ final class SystemAudioCapture: @unchecked Sendable {
         self.converter = conv
     }
 
+    // Sentinel returned by the converter data proc when all input has been
+    // consumed.  Must not collide with a real OSStatus error.
+    private static let kNoMoreData: OSStatus = 1
+
     private func resample(_ input: [Float]) -> [Float]? {
         guard let converter else { return nil }
         guard let tapFormat, tapFormat.mSampleRate > 0 else { return input }
@@ -309,16 +314,14 @@ final class SystemAudioCapture: @unchecked Sendable {
 
         var ioOutputDataPacketSize = UInt32(outputFrameCount)
 
-        var inputCopy = input
-
-        let err = inputCopy.withUnsafeMutableBytes { inputPtr in
+        let err = input.withUnsafeBytes { inputPtr in
             resampleOutputBuffer.withUnsafeMutableBytes { outputPtr -> OSStatus in
                 var inputBufList = AudioBufferList(
                     mNumberBuffers: 1,
                     mBuffers: AudioBuffer(
                         mNumberChannels: 1,
                         mDataByteSize: UInt32(input.count * MemoryLayout<Float>.size),
-                        mData: inputPtr.baseAddress
+                        mData: UnsafeMutableRawPointer(mutating: inputPtr.baseAddress)
                     )
                 )
 
@@ -336,18 +339,17 @@ final class SystemAudioCapture: @unchecked Sendable {
                     { (_, ioNumberDataPackets, ioData, _, inUserData) -> OSStatus in
                         guard let userData = inUserData else {
                             ioNumberDataPackets.pointee = 0
-                            return -50 // paramErr
+                            return 1  // kNoMoreData
                         }
                         let srcBufList = userData.assumingMemoryBound(to: AudioBufferList.self)
                         let available = srcBufList.pointee.mBuffers.mDataByteSize
                         if available == 0 {
                             ioNumberDataPackets.pointee = 0
-                            return -50 // no more data
+                            return 1  // kNoMoreData
                         }
                         ioData.pointee.mBuffers.mData = srcBufList.pointee.mBuffers.mData
                         ioData.pointee.mBuffers.mDataByteSize = available
                         ioNumberDataPackets.pointee = available / 4
-                        // Mark as consumed
                         srcBufList.pointee.mBuffers.mDataByteSize = 0
                         srcBufList.pointee.mBuffers.mData = nil
                         return noErr
@@ -360,8 +362,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             }
         }
 
-        // Accept noErr or "no more data" (-50) as valid outcomes
-        guard err == noErr || err == -50 else { return nil }
+        guard err == noErr || err == Self.kNoMoreData else { return nil }
 
         let actualCount = Int(ioOutputDataPacketSize)
         guard actualCount > 0 else { return nil }
