@@ -1,5 +1,8 @@
 import CoreAudio
 import AudioToolbox
+import os.log
+
+private let logger = Logger(subsystem: "com.vibe.ripcord", category: "SysCapture")
 
 final class SystemAudioCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.vibe.ripcord.systemaudio")
@@ -13,6 +16,10 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     // Resampling state (lazy-initialized if tap sample rate differs from target)
     private var converter: AudioConverterRef?
+
+    // Route-change handling
+    private var routeChangeListener: AudioObjectPropertyListenerBlock?
+    private var restartWorkItem: DispatchWorkItem?
 
     // Pre-allocated buffers for handleIOBlock (accessed only on serial queue)
     private var monoBuffer = [Float](repeating: 0, count: 8192)
@@ -105,9 +112,14 @@ final class SystemAudioCapture: @unchecked Sendable {
             throw CaptureError.deviceStartFailed(err)
         }
 
+        installRouteChangeListener()
     }
 
     func stop() {
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
+        removeRouteChangeListener()
+
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
             _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
             _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
@@ -127,6 +139,83 @@ final class SystemAudioCapture: @unchecked Sendable {
         if let converter {
             AudioConverterDispose(converter)
             self.converter = nil
+        }
+    }
+
+    // MARK: - Route Change Handling
+
+    private func installRouteChangeListener() {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+
+        let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            self.handleRouteChange()
+        }
+        routeChangeListener = block
+
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
+        )
+    }
+
+    private func removeRouteChangeListener() {
+        guard let block = routeChangeListener else { return }
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultOutputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        AudioObjectRemovePropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
+        )
+        routeChangeListener = nil
+    }
+
+    private func handleRouteChange() {
+        logger.error("Output device changed, scheduling recycle")
+
+        // Do NO CoreAudio calls on main — they can block for 1-2 seconds
+        // (AUHAL SelectDevice) and deadlock the main thread.
+        // Debounced full teardown + restart off main.
+        restartWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self else { return }
+            Task { await self.restartAfterRouteChange() }
+        }
+        restartWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func restartAfterRouteChange() async {
+        // Full teardown runs on the cooperative thread pool, not main.
+        if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
+            _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
+            self.ioProcID = nil
+        }
+        if aggregateDeviceID != kAudioObjectUnknown {
+            _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
+            aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
+        }
+        if tapID != kAudioObjectUnknown {
+            _ = AudioHardwareDestroyProcessTap(tapID)
+            tapID = AudioObjectID(kAudioObjectUnknown)
+        }
+        if let converter {
+            AudioConverterDispose(converter)
+            self.converter = nil
+        }
+
+        removeRouteChangeListener()
+
+        do {
+            try await start()
+            logger.error("System capture restarted after route change")
+        } catch {
+            logger.error("System capture restart failed: \(error.localizedDescription)")
         }
     }
 
