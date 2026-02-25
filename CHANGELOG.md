@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.7.3
+
+- Fix mic capture for non-48kHz devices (e.g. AirPods HFP at 24 kHz) by resampling manually via AudioConverter instead of relying on AUHAL's internal SRC
+- Harden audio teardown ordering to prevent IO callback races
+- Fix missing AudioDeviceStop in system audio route changes
+- Normalize resampler data-proc sentinel across both capture paths
+
 ## 0.7.2
 
 - Fix microphone access flickering on audio device changes (e.g. plugging in headphones)
