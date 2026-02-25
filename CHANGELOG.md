@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.7.4
+
+- Fix Zoom (and similar apps) causing a beachball and mic indicator flashing when joining a meeting. Ripcord was restarting its audio capture too aggressively during other apps' audio negotiation — concurrent CoreAudio operations were contending on a system-wide lock.
+
 ## 0.7.3
 
 - Rewrite audio capture pipeline for improved stability

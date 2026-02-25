@@ -20,6 +20,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     // Route-change handling
     private var routeChangeListener: AudioObjectPropertyListenerBlock?
     private var restartWorkItem: DispatchWorkItem?
+    private var restartTask: Task<Void, Never>?
 
     // Pre-allocated buffers for handleIOBlock (accessed only on serial queue)
     private var monoBuffer = [Float](repeating: 0, count: 8192)
@@ -118,6 +119,8 @@ final class SystemAudioCapture: @unchecked Sendable {
     func stop() {
         restartWorkItem?.cancel()
         restartWorkItem = nil
+        restartTask?.cancel()
+        restartTask = nil
         removeRouteChangeListener()
 
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
@@ -182,16 +185,19 @@ final class SystemAudioCapture: @unchecked Sendable {
         // (AUHAL SelectDevice) and deadlock the main thread.
         // Debounced full teardown + restart off main.
         restartWorkItem?.cancel()
+        restartTask?.cancel()
         let work = DispatchWorkItem { [weak self] in
             guard let self else { return }
-            Task { await self.restartAfterRouteChange() }
+            self.restartTask = Task { await self.restartAfterRouteChange() }
         }
         restartWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0, execute: work)
     }
 
     private func restartAfterRouteChange() async {
         // Full teardown runs on the cooperative thread pool, not main.
+        guard !Task.isCancelled else { return }
+
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
             _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
             _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
@@ -209,6 +215,9 @@ final class SystemAudioCapture: @unchecked Sendable {
             AudioConverterDispose(converter)
             self.converter = nil
         }
+
+        // Check cancellation before expensive recreation
+        guard !Task.isCancelled else { return }
 
         removeRouteChangeListener()
 

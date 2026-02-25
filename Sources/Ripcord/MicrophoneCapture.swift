@@ -438,7 +438,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         guard wasRunning else { return }
 
         tearDownAudioUnit()
-        scheduleRestart(delay: 0.5)
+        scheduleRestart(delay: 2.0)
     }
 
     private static let maxRestartAttempts = 5
@@ -459,8 +459,8 @@ final class MicrophoneCapture: @unchecked Sendable {
                     } catch {}
                 }
                 if attempt < Self.maxRestartAttempts {
-                    logger.error("Mic not ready (attempt \(attempt)), retrying in 1s")
-                    self.scheduleRestart(delay: 1.0, attempt: attempt + 1)
+                    logger.error("Mic not ready (attempt \(attempt)), retrying in 2s")
+                    self.scheduleRestart(delay: 2.0, attempt: attempt + 1)
                 } else {
                     logger.error("Mic restart failed after \(attempt) attempts: \(error.localizedDescription)")
                 }
