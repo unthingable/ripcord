@@ -2,10 +2,9 @@
 
 ## 0.7.3
 
-- Fix mic capture for non-48kHz devices (e.g. AirPods HFP at 24 kHz) by resampling manually via AudioConverter instead of relying on AUHAL's internal SRC
-- Harden audio teardown ordering to prevent IO callback races
-- Fix missing AudioDeviceStop in system audio route changes
-- Normalize resampler data-proc sentinel across both capture paths
+- Rewrite audio capture pipeline for improved stability
+- Fix microphone capture failing on AirPods and other Bluetooth headsets
+- Improve audio stability when switching devices during a session
 
 ## 0.7.2
 
