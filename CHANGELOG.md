@@ -2,33 +2,45 @@
 
 ## 0.7.3
 
-- Fix microphone capture failing on AirPods and other Bluetooth headsets
-- Improve stability when switching audio devices during a session
+- Fix mic capture for non-48kHz devices (e.g. AirPods HFP at 24 kHz) by resampling manually via AudioConverter instead of relying on AUHAL's internal SRC
+- Harden audio teardown ordering to prevent IO callback races
+- Fix missing AudioDeviceStop in system audio route changes
+- Normalize resampler data-proc sentinel across both capture paths
 
 ## 0.7.2
 
-- Fix microphone access flickering when plugging in or unplugging audio devices
+- Fix microphone access flickering on audio device changes (e.g. plugging in headphones)
 
 ## 0.7.1
 
-- Fix rename text field not accepting spaces
+- Fix rename text field not accepting spaces (was nested inside a Button)
 - Auto-focus rename text field when entering rename mode
-- Detect recordings added or removed outside the app
+- Watch output directory for external changes and update recent recordings list
 
 ## 0.7.0
 
-- Rename recordings after they finish instead of requiring a name upfront
-- Menubar icon turns red while recording
-- Add diarization benchmark tooling (parameter sweep, AMI/VoxConverse datasets)
+- Apply recording name as post-recording rename instead of baking into filename at start
+- Tint menubar icon red while recording
+- Add parameter sweep command for diarization tuning
+- Add diarization benchmark suite with AMI and VoxConverse datasets
+- Add compress command to transcode benchmark WAV files to M4A
+- Make prepare command idempotent
+- Fix stereo detection: check .m4a and .wav separately with OR logic
+- Fix sweep output: print per-file progress with flush for parallel workers
 
 ## 0.6.1
 
-- Fix dark mode (text fields no longer have white backgrounds)
-- Performance improvements on the audio write path
+- Fix dark mode: replace hardcoded white TextField backgrounds with system color
+- Simplify expressions and deduplicate helpers across codebase
+- Narrow JSON types from Codable to Encodable
+- Optimize interleave buffer allocation on audio write path
 
 ## 0.6.0
 
 - Add recording naming, renaming, and customizable file prefix
+- Fix recording row layout: independent tooltips and popover anchoring
+- Consolidate SRT/VTT timestamp formatters into a single function
+- Use OutputFormat.allCases for transcript file detection
 
 ## 0.5.0
 
