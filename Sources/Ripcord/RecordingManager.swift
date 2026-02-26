@@ -373,6 +373,9 @@ final class RecordingManager: @unchecked Sendable {
         )
         source.setEventHandler { [weak self] in
             guard let self else { return }
+            // Skip reload while recording — stopRecording handles list insertion itself,
+            // and the file write/finalize events would cause stale or duplicate entries.
+            if self.state == .recording { return }
             Task { await self.loadRecentRecordings() }
         }
         source.setCancelHandler { close(fd) }
@@ -617,6 +620,7 @@ final class RecordingManager: @unchecked Sendable {
         // Update state based on result
         switch result {
         case .success(let info):
+            recentRecordings.removeAll { $0.url == info.url }
             recentRecordings.insert(info, at: 0)
             if recentRecordings.count > 10 { recentRecordings.removeLast() }
             UserDefaults.standard.set(true, forKey: SettingsKey.hasRecordedBefore)
