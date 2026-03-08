@@ -9,7 +9,7 @@ macOS menubar app for retroactive audio recording with transcription.
 ## Features
 
 - **Retroactive circular buffer** — 1–15 min configurable; save audio that already happened
-- **System audio + microphone** capture with live mixing
+- **System audio + microphone** capture — mix together or split into stereo (system L, mic R)
 - **Live waveform + level meters** — real-time visualization during buffering and recording
 - **Capture duration scrubber** — drag to select how much of the buffer to keep
 - **Mic device selection** — choose input device from the menubar
@@ -59,11 +59,11 @@ Launch Ripcord from the menubar. It immediately starts filling a circular buffer
 - **Click Record** (or press Cmd+Shift+R) to save — the recording includes the selected buffer plus any new audio going forward
 - **Click Stop** to finish — the file is saved to the output directory
 
-The **waveform** shows live audio amplitude. During buffering, the highlighted region shows how much audio will be captured; during recording, the entire waveform turns red. The **level meters** on the right show system audio (blue) and microphone (green) levels.
+The **waveform** shows live audio amplitude. During buffering, the highlighted region shows how much audio will be captured; during recording, the entire waveform turns red. The **level meters** on the right show two bars — blue+green in split mode, purple in mixed mode.
 
 ### Microphone
 
-Use the mic dropdown at the bottom of the panel to select an input device, or toggle the mic off entirely. System audio is always captured regardless of mic setting.
+Use the mic dropdown at the bottom of the panel to select an input device, or toggle the mic off entirely. System audio is always captured regardless of mic setting. The stereo toggle switches between mixed (both sources in both channels) and split (system in left, mic in right) — useful for post-production remixing.
 
 ### Settings
 
