@@ -11,6 +11,7 @@ jobs:
     steps:
       - uses: actions/checkout@v4
       - run: swift build -c release
+      - run: make test
       - name: Create unsigned app bundle
         run: |
           BIN_PATH=$(swift build -c release --show-bin-path)
