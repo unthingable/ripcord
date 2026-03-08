@@ -1,5 +1,9 @@
 # Changelog
 
+## 0.8.1
+
+- Fix stereo and mic toggles being vertically misaligned in the mic row
+
 ## 0.8.0
 
 - True stereo recording: split system audio into the left channel and mic into the right, so you can isolate or remix sources after the fact. Toggle between split and mixed modes from the mic row or Settings.

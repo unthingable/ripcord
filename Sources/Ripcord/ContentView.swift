@@ -440,6 +440,7 @@ struct ContentView: View {
             VStack(spacing: 2) {
                 Image(systemName: "mic")
                     .font(.system(size: 9))
+                    .frame(height: 10)
                     .foregroundStyle(manager.micEnabled ? .primary : .secondary)
                 Toggle(isOn: Binding(
                     get: { manager.micEnabled },
@@ -467,6 +468,7 @@ struct ContentView: View {
                         .overlay(Circle().stroke(trueStereo ? .green : .secondary, lineWidth: 1.2))
                         .frame(width: 8, height: 8)
                 }
+                .frame(height: 10)
                 .animation(.easeInOut(duration: 0.2), value: split)
                 Toggle(isOn: Binding(
                     get: { !manager.channelSplit },
