@@ -266,8 +266,14 @@ struct ContentView: View {
         let sysLevel = manager.systemLevel
         let micLevel = manager.micLevel
         HStack(spacing: 2) {
-            verticalMeter(level: sysLevel, color: .blue)
-            verticalMeter(level: micLevel, color: .green)
+            if manager.channelSplit {
+                verticalMeter(level: sysLevel, color: .blue)
+                verticalMeter(level: micLevel, color: .green)
+            } else {
+                let combined = max(sysLevel, micLevel)
+                verticalMeter(level: combined, color: .purple)
+                verticalMeter(level: combined, color: .purple)
+            }
         }
         .frame(width: 12)
     }
@@ -431,15 +437,48 @@ struct ContentView: View {
             .disabled(!manager.micEnabled)
             .opacity(manager.micEnabled ? 1 : 0.4)
 
-            Toggle(isOn: Binding(
-                get: { manager.micEnabled },
-                set: { enabled in Task { await manager.setMicEnabled(enabled) } }
-            )) {
-                EmptyView()
+            VStack(spacing: 2) {
+                Image(systemName: "mic")
+                    .font(.system(size: 9))
+                    .foregroundStyle(manager.micEnabled ? .primary : .secondary)
+                Toggle(isOn: Binding(
+                    get: { manager.micEnabled },
+                    set: { enabled in Task { await manager.setMicEnabled(enabled) } }
+                )) {
+                    EmptyView()
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
             }
-            .toggleStyle(.switch)
-            .controlSize(.mini)
-            .labelsHidden()
+            .help("Microphone capture")
+
+            VStack(spacing: 2) {
+                let split = manager.channelSplit
+                let micActive = manager.micStatus == .active
+                let trueStereo = split && micActive
+                HStack(spacing: split ? 2 : -3) {
+                    Circle()
+                        .fill(trueStereo ? Color.blue.opacity(0.25) : .clear)
+                        .overlay(Circle().stroke(trueStereo ? .blue : .secondary, lineWidth: 1.2))
+                        .frame(width: 8, height: 8)
+                    Circle()
+                        .fill(trueStereo ? Color.green.opacity(0.25) : split ? .secondary.opacity(0.4) : .clear)
+                        .overlay(Circle().stroke(trueStereo ? .green : .secondary, lineWidth: 1.2))
+                        .frame(width: 8, height: 8)
+                }
+                .animation(.easeInOut(duration: 0.2), value: split)
+                Toggle(isOn: Binding(
+                    get: { !manager.channelSplit },
+                    set: { manager.updateChannelSplit(!$0) }
+                )) {
+                    EmptyView()
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+            }
+            .help("Stereo: mixed together\nSplit: system in left, mic in right")
         }
     }
 

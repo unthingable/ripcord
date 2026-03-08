@@ -45,7 +45,7 @@ final class AudioFileWriter: @unchecked Sendable {
     private var extAudioFile: ExtAudioFileRef?
     private let inputSampleRate: Double = AudioConstants.sampleRate
     private let wavOutputSampleRate: Double = 16000
-    private let channelCount: UInt32 = 2
+    let channelCount: UInt32
 
     let url: URL
     let format: AudioOutputFormat
@@ -53,10 +53,11 @@ final class AudioFileWriter: @unchecked Sendable {
     private(set) var totalFramesWritten: Int64 = 0
     private(set) var isOpen = false
 
-    init(url: URL, format: AudioOutputFormat, quality: AudioQuality) {
+    init(url: URL, format: AudioOutputFormat, quality: AudioQuality, channelCount: UInt32 = 2) {
         self.url = url
         self.format = format
         self.quality = quality
+        self.channelCount = channelCount
     }
 
     func open() throws {
@@ -90,7 +91,9 @@ final class AudioFileWriter: @unchecked Sendable {
 
         // Stereo AAC requires an explicit channel layout
         var channelLayout = AudioChannelLayout()
-        channelLayout.mChannelLayoutTag = kAudioChannelLayoutTag_Stereo
+        channelLayout.mChannelLayoutTag = channelCount > 1
+            ? kAudioChannelLayoutTag_Stereo
+            : kAudioChannelLayoutTag_Mono
 
         var status: OSStatus
         if channelCount > 1 {

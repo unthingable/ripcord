@@ -1,5 +1,10 @@
 # Changelog
 
+## 0.8.0
+
+- True stereo recording: split system audio into the left channel and mic into the right, so you can isolate or remix sources after the fact. Toggle between split and mixed modes from the mic row or Settings.
+- Stereo icon lights up blue/green when both channels are actively recording, and level meters always show two bars to reflect the current mode
+
 ## 0.7.5
 
 - Fix new recording appearing with the previous recording's metadata. The directory monitor was racing with recording finalization — inserting a stale entry before the file was fully written.

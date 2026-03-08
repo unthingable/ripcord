@@ -24,6 +24,7 @@ enum SettingsKey {
     static let outputFormat   = "ripcord.outputFormat"
     static let audioQuality   = "ripcord.audioQuality"
     static let micEnabled     = "ripcord.micEnabled"
+    static let channelSplit   = "ripcord.channelSplit"
     static let outputDirectory = "ripcord.outputDirectory"
     static let captureDuration = "ripcord.captureDurationSeconds"
     static let launchAtLogin  = "ripcord.launchAtLogin"
@@ -82,6 +83,7 @@ final class RecordingManager: @unchecked Sendable {
     var outputFormat: AudioOutputFormat = .wav
     var audioQuality: AudioQuality = .medium
     var micEnabled: Bool = true
+    var channelSplit: Bool = true
     var outputDirectory: URL
     var recentRecordings: [RecordingInfo] = []  // newest first, capped at 10
     var recordingElapsed: TimeInterval = 0
@@ -126,6 +128,9 @@ final class RecordingManager: @unchecked Sendable {
     // Remainder buffers for carry-forward interleaving — only accessed on writeQueue
     private var systemRemainder: [Float] = []
     private var micRemainder: [Float] = []
+
+    // Channel split snapshot — only accessed on writeQueue
+    private var splitEnabled: Bool = true
 
     // Silence detection state — only accessed on writeQueue
     private var silenceEnabled: Bool = false
@@ -174,6 +179,7 @@ final class RecordingManager: @unchecked Sendable {
             SettingsKey.outputFormat: AudioOutputFormat.wav.rawValue,
             SettingsKey.audioQuality: AudioQuality.medium.rawValue,
             SettingsKey.micEnabled: true,
+            SettingsKey.channelSplit: true,
             SettingsKey.outputDirectory: defaultDir.path,
             SettingsKey.launchAtLogin: false,
         ])
@@ -207,6 +213,7 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         micEnabled = defaults.bool(forKey: SettingsKey.micEnabled)
+        channelSplit = defaults.bool(forKey: SettingsKey.channelSplit)
         selectedMicUID = defaults.string(forKey: SettingsKey.selectedMicUID)
         transcriptionEnabled = defaults.bool(forKey: SettingsKey.enableTranscription)
 
@@ -446,7 +453,8 @@ final class RecordingManager: @unchecked Sendable {
         let systemSamples = Array(systemBuffer.drain().suffix(captureSamples))
         let micSamples = Array(micBuffer.drain().suffix(captureSamples))
 
-        // Snapshot silence settings for writeQueue (read from main thread before dispatch)
+        // Snapshot settings for writeQueue (read from main thread before dispatch)
+        let split = channelSplit
         let silenceOn = silenceAutoPauseEnabled
         let silenceThresh = silenceThreshold
         let silenceTimeout = silenceTimeoutSeconds
@@ -459,6 +467,9 @@ final class RecordingManager: @unchecked Sendable {
             self.writeError = nil
             self.systemRemainder = []
             self.micRemainder = []
+
+            // Initialize channel split state
+            self.splitEnabled = split
 
             // Initialize silence detection state
             self.silenceEnabled = silenceOn
@@ -502,7 +513,7 @@ final class RecordingManager: @unchecked Sendable {
             }
 
             // Write the retroactive buffer (use max() — full buffer, no next cycle)
-            let stereoBuffered = Self.interleave(systemSamples, micSamples)
+            let stereoBuffered = self.packStereo(systemSamples, micSamples)
             if !stereoBuffered.isEmpty {
                 do {
                     try newWriter.append(samples: stereoBuffered)
@@ -567,7 +578,7 @@ final class RecordingManager: @unchecked Sendable {
             self.micRemainder = []
 
             // Final flush uses max() — no next cycle to carry forward to
-            let stereo = Self.interleave(finalSystem, finalMic)
+            let stereo = self.packStereo(finalSystem, finalMic)
             if !stereo.isEmpty, let w = self.writer, self.writeError == nil {
                 do {
                     try w.append(samples: stereo)
@@ -644,6 +655,11 @@ final class RecordingManager: @unchecked Sendable {
             micCapture.stop()
             micStatus = .off
         }
+    }
+
+    func updateChannelSplit(_ enabled: Bool) {
+        channelSplit = enabled
+        UserDefaults.standard.set(enabled, forKey: SettingsKey.channelSplit)
     }
 
     func updateBufferDuration(_ seconds: Int) {
@@ -909,8 +925,9 @@ final class RecordingManager: @unchecked Sendable {
         systemCapture.stop()
     }
 
-    // MARK: - Stereo Interleaving
+    // MARK: - Stereo Packing
 
+    /// Split mode: system audio in left channel, mic in right channel.
     static func interleave(_ system: [Float], _ mic: [Float]) -> [Float] {
         let len = max(system.count, mic.count)
         guard len > 0 else { return [] }
@@ -918,6 +935,29 @@ final class RecordingManager: @unchecked Sendable {
             for i in 0..<len {
                 buffer[i * 2]     = i < system.count ? system[i] : 0  // L
                 buffer[i * 2 + 1] = i < mic.count    ? mic[i]    : 0  // R
+            }
+            count = len * 2
+        }
+    }
+
+    /// Packs system and mic audio into stereo frames using the appropriate mode.
+    func packStereo(_ system: [Float], _ mic: [Float]) -> [Float] {
+        splitEnabled
+            ? Self.interleave(system, mic)
+            : Self.mixStereo(system, mic)
+    }
+
+    /// Mixed mode: both sources summed into both channels.
+    static func mixStereo(_ system: [Float], _ mic: [Float]) -> [Float] {
+        let len = max(system.count, mic.count)
+        guard len > 0 else { return [] }
+        return [Float](unsafeUninitializedCapacity: len * 2) { buffer, count in
+            for i in 0..<len {
+                let sys: Float = i < system.count ? system[i] : 0
+                let m: Float = i < mic.count ? mic[i] : 0
+                let mixed = sys + m
+                buffer[i * 2]     = mixed
+                buffer[i * 2 + 1] = mixed
             }
             count = len * 2
         }
@@ -1045,7 +1085,7 @@ final class RecordingManager: @unchecked Sendable {
         if sysCount > 0 && micCount > 0 {
             // Both sources have data — interleave min(), carry forward the tail
             let len = min(sysCount, micCount)
-            stereo = Self.interleave(Array(sys.prefix(len)), Array(mic.prefix(len)))
+            stereo = packStereo(Array(sys.prefix(len)), Array(mic.prefix(len)))
             if sysCount > len {
                 systemRemainder = Array(sys.suffix(sysCount - len))
             }
@@ -1065,7 +1105,7 @@ final class RecordingManager: @unchecked Sendable {
             return
         } else {
             // One source exceeds the cap — the other is truly off; flush with zero-pad
-            stereo = Self.interleave(sys, mic)
+            stereo = packStereo(sys, mic)
         }
 
         guard !stereo.isEmpty else { return }

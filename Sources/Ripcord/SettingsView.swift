@@ -55,6 +55,12 @@ struct SettingsView: View {
                             Task { await manager.setMicEnabled(enabled) }
                         }
                     ))
+
+                    Toggle("Split channels", isOn: Binding(
+                        get: { manager.channelSplit },
+                        set: { manager.updateChannelSplit($0) }
+                    ))
+                    .help("When on, system audio goes to the left channel and mic to the right. When off, both are mixed together.")
                 }
 
                 Section("Silence Detection") {
