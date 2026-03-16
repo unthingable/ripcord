@@ -18,15 +18,15 @@ struct ContentView: View {
             // Status
             statusSection
 
-            // Capture duration scrubber with level meters (buffering + recording)
-            if manager.state == .buffering || manager.state == .recording {
+            // Capture duration scrubber with level meters
+            if manager.state == .buffering || manager.state == .recording || manager.state == .paused {
                 captureSlider
                     .onAppear { manager.startWaveformTimer() }
                     .onDisappear { manager.stopWaveformTimer() }
             }
 
             // Recording name field
-            if manager.state == .buffering || manager.state == .recording {
+            if manager.state == .buffering || manager.state == .recording || manager.state == .paused {
                 nameField
             }
 
@@ -90,7 +90,7 @@ struct ContentView: View {
                 Spacer()
 
                 Button("Quit") {
-                    if manager.state == .recording {
+                    if manager.state == .recording || manager.state == .paused {
                         manager.stopRecording()
                     }
                     manager.shutdown()
@@ -138,6 +138,7 @@ struct ContentView: View {
         case .buffering: return .green
         case .recording:
             return manager.isSilencePaused ? .red.opacity(0.4) : .red
+        case .paused: return .orange
         case .error: return .orange
         }
     }
@@ -157,6 +158,9 @@ struct ContentView: View {
             return manager.isSilencePaused
                 ? "Recording (\(elapsed)) - Silence"
                 : "Recording (\(elapsed))"
+        case .paused:
+            let elapsed = formatTime(Int(manager.recordingElapsed))
+            return "Paused (\(elapsed))"
         case .error(let msg):
             return "Error: \(msg)"
         }
@@ -167,6 +171,8 @@ struct ContentView: View {
     @ViewBuilder
     private var captureSlider: some View {
         let isRecording = manager.state == .recording
+        let isPaused = manager.state == .paused
+        let isCapturing = isRecording || isPaused
 
         VStack(spacing: 4) {
             HStack {
@@ -174,6 +180,10 @@ struct ContentView: View {
                     Text("Recording")
                         .font(.caption)
                         .foregroundStyle(.red)
+                } else if isPaused {
+                    Text("Paused")
+                        .font(.caption)
+                        .foregroundStyle(.orange)
                 } else {
                     Text("Capture: \(formatTime(manager.captureDurationSeconds))")
                         .font(.caption)
@@ -196,6 +206,7 @@ struct ContentView: View {
                     let captureFraction = Double(manager.captureDurationSeconds) / bufMax
                     let handleX = width * (1 - captureFraction)
                     let amps = manager.waveformAmplitudes
+                    let states = manager.waveformBarStates
 
                     Canvas { context, size in
                         let barWidth: CGFloat = 2
@@ -211,13 +222,25 @@ struct ContentView: View {
                             let x = CGFloat(startBar + i) * step
                             let amp = CGFloat(amps[100 - filledBars + i])
                             let barHeight = max(2, amp * size.height * 0.9)
+                            let barState = states[100 - filledBars + i]
 
                             let color: Color
-                            if isRecording {
+                            switch barState {
+                            case .recorded:
                                 color = .red
-                            } else {
-                                let isCaptured = x >= handleX
-                                color = isCaptured ? .accentColor : .primary.opacity(0.15)
+                            case .paused:
+                                color = .orange
+                            case .priorRecorded:
+                                color = .red.opacity(0.4)
+                            case .priorPaused:
+                                color = .orange.opacity(0.4)
+                            case .idle:
+                                if isCapturing {
+                                    color = .primary.opacity(0.15)
+                                } else {
+                                    let isCaptured = x >= handleX
+                                    color = isCaptured ? .accentColor : .primary.opacity(0.15)
+                                }
                             }
 
                             let rect = CGRect(
@@ -229,8 +252,8 @@ struct ContentView: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(color))
                         }
 
-                        // Handle line (hidden during recording)
-                        if !isRecording, handleX <= size.width {
+                        // Handle line (hidden during recording/paused)
+                        if !isCapturing, handleX <= size.width {
                             let handleRect = CGRect(x: handleX - 1, y: 0, width: 2, height: size.height)
                             context.fill(
                                 Path(roundedRect: handleRect, cornerRadius: 1),
@@ -238,7 +261,7 @@ struct ContentView: View {
                             )
                         }
                     }
-                    .allowsHitTesting(!isRecording)
+                    .allowsHitTesting(!isCapturing)
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
@@ -328,12 +351,37 @@ struct ContentView: View {
     @ViewBuilder
     private var recordButton: some View {
         if manager.state == .recording {
-            Button(action: { manager.stopRecording() }) {
-                Label("Stop Recording", systemImage: "stop.fill")
-                    .frame(maxWidth: .infinity)
+            HStack(spacing: 8) {
+                Button(action: { manager.pauseRecording() }) {
+                    Label("Pause", systemImage: "pause.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut("p", modifiers: [])
+
+                Button(action: { manager.stopRecording() }) {
+                    Label("Stop Recording", systemImage: "stop.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut(".", modifiers: [.command])
             }
-            .controlSize(.large)
-            .keyboardShortcut(".", modifiers: [.command])
+        } else if manager.state == .paused {
+            HStack(spacing: 8) {
+                Button(action: { manager.resumeRecording() }) {
+                    Label("Resume", systemImage: "play.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut("p", modifiers: [])
+
+                Button(action: { manager.stopRecording() }) {
+                    Label("Stop Recording", systemImage: "stop.fill")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut(".", modifiers: [.command])
+            }
         } else if manager.state == .buffering {
             Button(action: { manager.startRecording() }) {
                 Label("Record", systemImage: "record.circle")
@@ -533,7 +581,8 @@ struct ContentView: View {
         let toggleRecording = {
             DispatchQueue.main.async {
                 if mgr.state == .buffering { mgr.startRecording() }
-                else if mgr.state == .recording { mgr.stopRecording() }
+                else if mgr.state == .recording { mgr.pauseRecording() }
+                else if mgr.state == .paused { mgr.resumeRecording() }
             }
         }
 

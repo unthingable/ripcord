@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.0
+
+- Pause and resume during recording. Press Pause to suspend capture without ending the session — the waveform keeps rolling and new bars turn orange to show the gap. Resume picks up where you left off. Cmd+Shift+O cycles between recording and paused; Cmd+. stops from either state.
+- Continuous waveform that never resets. The rolling 100-bar display stays live across all states — buffering, recording, paused, and after stopping. Bars are color-coded: blue for the capture window, red for recorded audio, orange for paused sections, and dimmed red/orange for prior recordings as they scroll off.
+- Lower the minimum capture lookback from 30 seconds to 5 seconds
+
 ## 0.8.1
 
 - Fix stereo and mic toggles being vertically misaligned in the mic row

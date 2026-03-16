@@ -9,6 +9,7 @@ enum AppState: Equatable {
     case starting
     case buffering
     case recording
+    case paused
     case error(String)
 }
 
@@ -89,6 +90,7 @@ final class RecordingManager: @unchecked Sendable {
     var recordingElapsed: TimeInterval = 0
     var micStatus: MicStatus = .off
     var waveformAmplitudes: [Float] = Array(repeating: 0, count: 100)
+    var waveformBarStates: [BarState] = Array(repeating: .idle, count: 100)
     var filledBarCount: Int = 1
     var systemLevel: Float = 0
     var micLevel: Float = 0
@@ -139,15 +141,9 @@ final class RecordingManager: @unchecked Sendable {
     private var silenceSampleCount: Int = 0
     private var silenceDetected: Bool = false
 
-    // Recording waveform ring buffer — only accessed on writeQueue.
-    // Tracks peak amplitude per 150ms bar so the waveform survives popover close/reopen.
-    private static let recordingBarCount = 100
-    private static let recordingBarSamplesPerBar = AudioConstants.sampleRateInt // 48000 samples = 1 second per bar
-    private var recordingBarPeaks = [Float](repeating: 0, count: 100)
-    private var recordingBarHead: Int = 0
-    private var recordingBarFilled: Int = 0
-    private var recordingBarCurrentPeak: Float = 0
-    private var recordingBarSampleCount: Int = 0
+    // Pause tracking
+    private var pausedDuration: TimeInterval = 0
+    private var pauseStartTime: Date?
 
     /// Max samples one source can accumulate without the other before we assume the other is off.
     /// 500ms at 48kHz = 24000 samples.
@@ -382,7 +378,7 @@ final class RecordingManager: @unchecked Sendable {
             guard let self else { return }
             // Skip reload while recording — stopRecording handles list insertion itself,
             // and the file write/finalize events would cause stale or duplicate entries.
-            if self.state == .recording { return }
+            if self.state == .recording || self.state == .paused { return }
             Task { await self.loadRecentRecordings() }
         }
         source.setCancelHandler { close(fd) }
@@ -438,20 +434,24 @@ final class RecordingManager: @unchecked Sendable {
             return
         }
 
-        // Bug #1 fix: Enable pending BEFORE draining so no samples are lost.
-        // From this instant, all new callback samples go to pending arrays.
+        // Read back-record audio from circular buffers (read without drain — waveform stays continuous)
+        let captureSamples = captureDurationSeconds * AudioConstants.sampleRateInt
+        let systemSamples = systemBuffer.read(lastNSamples: captureSamples)
+        let micSamples = micBuffer.read(lastNSamples: captureSamples)
+
+        // Mark back-record bars as recorded and set state for new bars
+        let barsInCapture = min(100, captureDurationSeconds * 100 / max(1, bufferDurationSeconds))
+        systemBuffer.markRecentBars(barsInCapture, state: .recorded)
+        micBuffer.markRecentBars(barsInCapture, state: .recorded)
+        systemBuffer.setBarState(.recorded)
+        micBuffer.setBarState(.recorded)
+
+        // Enable pending AFTER reading (tiny sample gap is negligible)
         pendingLock.lock()
         pendingActive = true
         pendingSystemSamples.removeAll()
         pendingMicSamples.removeAll()
         pendingLock.unlock()
-
-        // Drain circular buffers (fast — just array copies under lock).
-        // Any samples arriving now go to pending arrays, not the drained buffers.
-        // Trim to capture duration — user may only want the last N seconds of the buffer.
-        let captureSamples = captureDurationSeconds * AudioConstants.sampleRateInt
-        let systemSamples = Array(systemBuffer.drain().suffix(captureSamples))
-        let micSamples = Array(micBuffer.drain().suffix(captureSamples))
 
         // Snapshot settings for writeQueue (read from main thread before dispatch)
         let split = channelSplit
@@ -459,60 +459,20 @@ final class RecordingManager: @unchecked Sendable {
         let silenceThresh = silenceThreshold
         let silenceTimeout = silenceTimeoutSeconds
 
-        // Bug #2 fix: Dispatch the expensive interleave + write to writeQueue.
-        // The serial queue guarantees the initial write completes before any flush timer fires.
         writeQueue.async { [weak self] in
             guard let self else { return }
             self.writer = newWriter
             self.writeError = nil
             self.systemRemainder = []
             self.micRemainder = []
-
-            // Initialize channel split state
             self.splitEnabled = split
-
-            // Initialize silence detection state
             self.silenceEnabled = silenceOn
             self.silenceThresholdLocal = silenceThresh
             self.silenceSampleThreshold = Int(silenceTimeout * Double(AudioConstants.sampleRateInt))
             self.silenceSampleCount = 0
             self.silenceDetected = false
 
-            // Initialize recording waveform ring buffer, seeded from the retroactive buffer.
-            // Compute bar peaks from the drained audio so the waveform shows history immediately.
-            self.recordingBarPeaks = [Float](repeating: 0, count: Self.recordingBarCount)
-            self.recordingBarHead = 0
-            self.recordingBarFilled = 0
-            self.recordingBarCurrentPeak = 0
-            self.recordingBarSampleCount = 0
-            let spb = Self.recordingBarSamplesPerBar
-            let retroSamples = max(systemSamples.count, micSamples.count)
-            if retroSamples > 0 {
-                // Walk through the retroactive buffer in bar-sized chunks, taking max(sys, mic) peak per bar
-                let barCount = min(Self.recordingBarCount, (retroSamples + spb - 1) / spb)
-                // Start from the end so the most recent audio fills the rightmost bars
-                let startSample = retroSamples - barCount * spb
-                for bar in 0..<barCount {
-                    var peak: Float = 0
-                    let offset = max(0, startSample + bar * spb)
-                    let end = min(retroSamples, offset + spb)
-                    for i in offset..<end {
-                        if i < systemSamples.count {
-                            let a = abs(systemSamples[i])
-                            if a > peak { peak = a }
-                        }
-                        if i < micSamples.count {
-                            let a = abs(micSamples[i])
-                            if a > peak { peak = a }
-                        }
-                    }
-                    self.recordingBarPeaks[bar] = peak
-                }
-                self.recordingBarHead = barCount % Self.recordingBarCount
-                self.recordingBarFilled = barCount
-            }
-
-            // Write the retroactive buffer (use max() — full buffer, no next cycle)
+            // Write the back-record buffer
             let stereoBuffered = self.packStereo(systemSamples, micSamples)
             if !stereoBuffered.isEmpty {
                 do {
@@ -522,7 +482,7 @@ final class RecordingManager: @unchecked Sendable {
                 }
             }
 
-            // Start write timer AFTER initial write (fires every 50ms on writeQueue)
+            // Start write timer (fires every 50ms on writeQueue)
             let timer = DispatchSource.makeTimerSource(queue: self.writeQueue)
             timer.schedule(deadline: .now() + .milliseconds(50), repeating: .milliseconds(50))
             timer.setEventHandler { [weak self] in
@@ -532,21 +492,27 @@ final class RecordingManager: @unchecked Sendable {
             self.writeTimer = timer
         }
 
-        // Update state and start elapsed timer (main thread, immediate)
-        // Reset waveform for fresh streaming display during recording
-        waveformAmplitudes = [Float](repeating: 0, count: 100)
-        filledBarCount = 0
+        // Update state and start elapsed timer
         state = .recording
         recordingStartTime = Date()
         recordingElapsed = 0
+        pausedDuration = 0
+        pauseStartTime = nil
         elapsedTimer = Timer.scheduledTimer(withTimeInterval: 1, repeats: true) { [weak self] _ in
             guard let self, let start = self.recordingStartTime else { return }
-            self.recordingElapsed = Date().timeIntervalSince(start)
+            guard self.state != .paused else { return }
+            self.recordingElapsed = Date().timeIntervalSince(start) - self.pausedDuration
         }
     }
 
     func stopRecording() {
-        guard state == .recording else { return }
+        guard state == .recording || state == .paused else { return }
+
+        // Finalize any ongoing pause
+        if let pauseStart = pauseStartTime {
+            pausedDuration += Date().timeIntervalSince(pauseStart)
+            pauseStartTime = nil
+        }
 
         // Stop elapsed timer (main thread)
         elapsedTimer?.invalidate()
@@ -554,6 +520,12 @@ final class RecordingManager: @unchecked Sendable {
         recordingStartTime = nil
         recordingElapsed = 0
         isSilencePaused = false
+
+        // Dim recorded/paused bars to prior variants, set new bars to idle
+        systemBuffer.dimAllBars()
+        micBuffer.dimAllBars()
+        systemBuffer.setBarState(.idle)
+        micBuffer.setBarState(.idle)
 
         // Disable pending accumulation and grab remaining samples
         pendingLock.lock()
@@ -646,6 +618,69 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
+    func pauseRecording() {
+        guard state == .recording else { return }
+
+        // Stop accumulating samples for recording
+        pendingLock.lock()
+        pendingActive = false
+        let remainingSys = pendingSystemSamples
+        let remainingMic = pendingMicSamples
+        pendingSystemSamples.removeAll()
+        pendingMicSamples.removeAll()
+        pendingLock.unlock()
+
+        // Flush remaining samples to disk
+        writeQueue.async { [weak self] in
+            guard let self, let w = self.writer, self.writeError == nil else { return }
+            let finalSys = self.systemRemainder + remainingSys
+            let finalMic = self.micRemainder + remainingMic
+            self.systemRemainder = []
+            self.micRemainder = []
+            let stereo = self.packStereo(finalSys, finalMic)
+            if !stereo.isEmpty {
+                try? w.append(samples: stereo)
+            }
+        }
+
+        // Update bar states to paused
+        systemBuffer.setBarState(.paused)
+        micBuffer.setBarState(.paused)
+
+        // Track pause time
+        pauseStartTime = Date()
+
+        state = .paused
+    }
+
+    func resumeRecording() {
+        guard state == .paused else { return }
+
+        // Accumulate paused duration
+        if let pauseStart = pauseStartTime {
+            pausedDuration += Date().timeIntervalSince(pauseStart)
+            pauseStartTime = nil
+        }
+
+        // Re-enable pending
+        pendingLock.lock()
+        pendingActive = true
+        pendingSystemSamples.removeAll()
+        pendingMicSamples.removeAll()
+        pendingLock.unlock()
+
+        // Update bar states to recorded
+        systemBuffer.setBarState(.recorded)
+        micBuffer.setBarState(.recorded)
+
+        // Update elapsed immediately so the display doesn't lag for up to 1 second
+        if let start = recordingStartTime {
+            recordingElapsed = Date().timeIntervalSince(start) - pausedDuration
+        }
+
+        state = .recording
+    }
+
     func setMicEnabled(_ enabled: Bool) async {
         micEnabled = enabled
         UserDefaults.standard.set(enabled, forKey: SettingsKey.micEnabled)
@@ -663,7 +698,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func updateBufferDuration(_ seconds: Int) {
-        guard state != .recording else { return }
+        guard state != .recording && state != .paused else { return }
         bufferDurationSeconds = seconds
         UserDefaults.standard.set(seconds, forKey: SettingsKey.bufferDuration)
         systemBuffer.resize(durationSeconds: seconds, sampleRate: AudioConstants.sampleRateInt)
@@ -675,18 +710,18 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func updateCaptureDuration(_ seconds: Int) {
-        captureDurationSeconds = max(30, min(seconds, bufferDurationSeconds))
+        captureDurationSeconds = max(5, min(seconds, bufferDurationSeconds))
         UserDefaults.standard.set(captureDurationSeconds, forKey: SettingsKey.captureDuration)
     }
 
     func updateOutputFormat(_ format: AudioOutputFormat) {
-        guard state != .recording else { return }
+        guard state != .recording && state != .paused else { return }
         outputFormat = format
         UserDefaults.standard.set(format.rawValue, forKey: SettingsKey.outputFormat)
     }
 
     func updateAudioQuality(_ quality: AudioQuality) {
-        guard state != .recording else { return }
+        guard state != .recording && state != .paused else { return }
         audioQuality = quality
         UserDefaults.standard.set(quality.rawValue, forKey: SettingsKey.audioQuality)
     }
@@ -910,7 +945,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func shutdown() {
-        if state == .recording {
+        if state == .recording || state == .paused {
             stopRecording()
         }
         writeQueue.sync {
@@ -965,9 +1000,7 @@ final class RecordingManager: @unchecked Sendable {
 
     // MARK: - Private
 
-    // Bug #4 fix: Mutually exclusive — when recording, write only to pending arrays;
-    // when buffering, write only to circular buffer. Prevents stale data in the
-    // circular buffer from polluting the next recording's retroactive buffer.
+    // Audio always flows to circular buffers (continuous waveform); also to pending when recording.
 
     private func handleSystemSamples(_ samples: [Float]) {
         routeSamples(samples, peakAccum: &systemPeakAccum,
@@ -979,8 +1012,7 @@ final class RecordingManager: @unchecked Sendable {
                      pendingArray: &pendingMicSamples, buffer: micBuffer)
     }
 
-    /// Routes incoming audio samples to either the pending recording array or the circular buffer,
-    /// and tracks peak amplitude for level metering.
+    /// Routes incoming audio to the circular buffer (always) and pending recording array (when active).
     private func routeSamples(_ samples: [Float], peakAccum: inout Float,
                               pendingArray: inout [Float], buffer: CircularAudioBuffer) {
         var peak: Float = 0
@@ -992,16 +1024,15 @@ final class RecordingManager: @unchecked Sendable {
         if peak > peakAccum { peakAccum = peak }
         meterLock.unlock()
 
-        var recording = false
+        // Always write to circular buffer (continuous waveform)
+        buffer.write(samples)
+
+        // Also accumulate for recording when active
         pendingLock.lock()
         if pendingActive {
-            recording = true
             pendingArray.append(contentsOf: samples)
         }
         pendingLock.unlock()
-        if !recording {
-            buffer.write(samples)
-        }
     }
 
     /// Called on writeQueue by the write timer — flushes pending samples to disk.
@@ -1022,10 +1053,9 @@ final class RecordingManager: @unchecked Sendable {
         systemRemainder = []
         micRemainder = []
 
-        // Compute combined peak amplitude once — used by both waveform and silence detection.
-        let flushSampleCount = max(sys.count, mic.count)
+        // Compute combined peak amplitude for silence detection.
         var flushPeak: Float = 0
-        if flushSampleCount > 0 {
+        if !sys.isEmpty || !mic.isEmpty {
             for s in sys {
                 let a = abs(s)
                 if a > flushPeak { flushPeak = a }
@@ -1033,18 +1063,6 @@ final class RecordingManager: @unchecked Sendable {
             for s in mic {
                 let a = abs(s)
                 if a > flushPeak { flushPeak = a }
-            }
-
-            // Recording waveform: accumulate peak amplitude into the ring buffer.
-            // Runs before silence detection so bar peaks reflect all audio (including silent periods as low bars).
-            if flushPeak > recordingBarCurrentPeak { recordingBarCurrentPeak = flushPeak }
-            recordingBarSampleCount += flushSampleCount
-            while recordingBarSampleCount >= Self.recordingBarSamplesPerBar {
-                recordingBarPeaks[recordingBarHead] = recordingBarCurrentPeak
-                recordingBarHead = (recordingBarHead + 1) % Self.recordingBarCount
-                if recordingBarFilled < Self.recordingBarCount { recordingBarFilled += 1 }
-                recordingBarCurrentPeak = 0
-                recordingBarSampleCount -= Self.recordingBarSamplesPerBar
             }
         }
 
@@ -1117,33 +1135,6 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
-    /// Returns a snapshot of the recording waveform ring buffer as (bars, filledCount).
-    /// The returned array has `recordingBarCount` elements in chronological order (oldest first),
-    /// right-aligned so the newest bar is at the last index.
-    /// Must be called from a context that can block briefly (dispatches sync to writeQueue).
-    private func snapshotRecordingBars() -> ([Float], Int) {
-        var bars = [Float](repeating: 0, count: Self.recordingBarCount)
-        var filled = 0
-        writeQueue.sync {
-            filled = self.recordingBarFilled
-            let committed = min(filled, Self.recordingBarCount)
-            let hasPartial = self.recordingBarSampleCount > 0
-            // Total bars = committed + partial (if any), capped to the display size
-            let total = min(committed + (hasPartial ? 1 : 0), Self.recordingBarCount)
-            // How many committed bars fit (partial takes the last slot if present)
-            let committedSlots = hasPartial ? total - 1 : total
-            let readStart = (self.recordingBarHead - committedSlots + Self.recordingBarCount) % Self.recordingBarCount
-            let destOffset = Self.recordingBarCount - total
-            for i in 0..<committedSlots {
-                bars[destOffset + i] = self.recordingBarPeaks[(readStart + i) % Self.recordingBarCount]
-            }
-            if hasPartial {
-                bars[Self.recordingBarCount - 1] = self.recordingBarCurrentPeak
-            }
-        }
-        return (bars, min(filled + 1, Self.recordingBarCount))
-    }
-
     private func consumeMeterPeaks() -> (system: Float, mic: Float) {
         meterLock.lock()
         let sys = systemPeakAccum
@@ -1157,41 +1148,32 @@ final class RecordingManager: @unchecked Sendable {
     func startWaveformTimer() {
         waveformTimer?.invalidate()
 
-        // Seed waveform from existing data instead of starting blank
-        if state == .recording {
-            let (bars, filled) = snapshotRecordingBars()
-            waveformAmplitudes = bars
-            filledBarCount = filled
-        } else {
-            waveformAmplitudes = [Float](repeating: 0, count: 100)
-            filledBarCount = 1
-        }
+        // Seed immediately from circular buffers
+        updateWaveformFromBuffers()
 
         waveformTimer = Timer.scheduledTimer(withTimeInterval: 0.15, repeats: true) { [weak self] _ in
-            guard let self else { return }
-
-            // Level meters: consume peaks tracked inline in audio callbacks
-            let peaks = self.consumeMeterPeaks()
-            self.systemLevel = max(self.systemLevel * 0.6, peaks.system)
-            self.micLevel = max(self.micLevel * 0.6, peaks.mic)
-
-            if self.state == .recording {
-                // Read waveform from the recording ring buffer (survives popover close/reopen)
-                let (bars, filled) = self.snapshotRecordingBars()
-                self.waveformAmplitudes = bars
-                self.filledBarCount = filled
-            } else {
-                // Buffer mode: read from circular buffers
-                let sysRaw = self.systemBuffer.getBarPeaks()
-                let micRaw = self.micBuffer.getBarPeaks()
-                var raw = [Float](repeating: 0, count: 100)
-                for i in 0..<100 {
-                    raw[i] = max(sysRaw[i], micRaw[i])
-                }
-                self.waveformAmplitudes = raw
-                self.updateFilledBarCount()
-            }
+            self?.updateWaveformFromBuffers()
         }
+    }
+
+    private func updateWaveformFromBuffers() {
+        // Level meters: consume peaks tracked inline in audio callbacks
+        let meterPeaks = consumeMeterPeaks()
+        systemLevel = max(systemLevel * 0.6, meterPeaks.system)
+        micLevel = max(micLevel * 0.6, meterPeaks.mic)
+
+        // Waveform always from circular buffers (continuous, never resets)
+        let (sysPeaks, sysStates) = systemBuffer.getBarPeaks()
+        let (micPeaks, micStates) = micBuffer.getBarPeaks()
+        var mergedPeaks = [Float](repeating: 0, count: 100)
+        var mergedStates = [BarState](repeating: .idle, count: 100)
+        for i in 0..<100 {
+            mergedPeaks[i] = max(sysPeaks[i], micPeaks[i])
+            mergedStates[i] = max(sysStates[i], micStates[i])
+        }
+        waveformAmplitudes = mergedPeaks
+        waveformBarStates = mergedStates
+        updateFilledBarCount()
     }
 
     func stopWaveformTimer() {

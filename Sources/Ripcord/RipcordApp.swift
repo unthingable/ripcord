@@ -34,6 +34,9 @@ struct RipcordApp: App {
         case .recording:
             name = "waveform.circle.fill"
             tint = .systemRed
+        case .paused:
+            name = "waveform.circle.fill"
+            tint = .systemOrange
         case .error:
             name = "exclamationmark.triangle"
             tint = nil

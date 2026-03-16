@@ -7,7 +7,7 @@ struct SettingsView: View {
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
 
-    private var isRecording: Bool { manager.state == .recording }
+    private var isRecording: Bool { manager.state == .recording || manager.state == .paused }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {
