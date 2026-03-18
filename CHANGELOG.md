@@ -1,5 +1,11 @@
 # Changelog
 
+## 0.9.1
+
+- Fix mic capture blocking other apps' audio negotiation. CoreAudio listeners now run on dedicated serial queues with debouncing, so events like AirPods connecting during a Zoom call produce a single clean restart instead of cascading teardown loops.
+- Fix transcribe buttons vanishing while a transcription is in progress — they now stay visible but disabled.
+- Cancel an in-progress transcription by hovering the progress spinner to reveal a stop button.
+
 ## 0.9.0
 
 - Pause and resume during recording. Press Pause to suspend capture without ending the session — the waveform keeps rolling and new bars turn orange to show the gap. Resume picks up where you left off. Cmd+Shift+O cycles between recording and paused; Cmd+. stops from either state.
