@@ -530,7 +530,7 @@ func testBarPeakLiveBar() {
     // Write fewer than samplesPerBar — only the live bar (index 99) should be non-zero
     let buf = CircularAudioBuffer(durationSeconds: 1, sampleRate: 1000) // samplesPerBar = 10
     buf.write([0.5, -0.8, 0.3])
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     assert(peaks.count == 100, "bar peaks should have 100 entries")
     assert(peaks[99] == Float(0.8), "live bar should be 0.8 (max abs), got \(peaks[99])")
     for i in 0..<99 {
@@ -542,7 +542,7 @@ func testBarPeakSingleCommit() {
     let buf = CircularAudioBuffer(durationSeconds: 1, sampleRate: 1000) // samplesPerBar = 10
     let samples: [Float] = [0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9, 1.0]
     buf.write(samples)
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     assert(peaks[98] == Float(1.0), "committed bar peak = 1.0, got \(peaks[98])")
     assert(peaks[99] == 0, "live bar = 0 after exact commit, got \(peaks[99])")
 }
@@ -553,7 +553,7 @@ func testBarPeakWithPartialBar() {
     var samples = [Float](repeating: 0.3, count: 10)
     samples += [0.1, 0.2, 0.9, 0.4, 0.5]
     buf.write(samples)
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     assert(peaks[98] == Float(0.3), "committed bar peak = 0.3, got \(peaks[98])")
     assert(peaks[99] == Float(0.9), "live bar peak = 0.9, got \(peaks[99])")
 }
@@ -566,7 +566,7 @@ func testBarPeakOrdering() {
     for _ in 0..<10 { samples.append(0.6) }
     for _ in 0..<10 { samples.append(0.9) }
     buf.write(samples)
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     assert(peaks[96] == Float(0.3), "oldest bar = 0.3, got \(peaks[96])")
     assert(peaks[97] == Float(0.6), "middle bar = 0.6, got \(peaks[97])")
     assert(peaks[98] == Float(0.9), "newest bar = 0.9, got \(peaks[98])")
@@ -576,7 +576,7 @@ func testBarPeakOrdering() {
 func testBarPeakNegativeSamples() {
     let buf = CircularAudioBuffer(durationSeconds: 1, sampleRate: 1000)
     buf.write([-0.7, 0.3, -0.5])
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     assert(peaks[99] == Float(0.7), "live bar tracks abs of negative samples, got \(peaks[99])")
 }
 
@@ -589,7 +589,7 @@ func testBarPeakWrapAround() {
         barSamples[0] = peak
         buf.write(barSamples)
     }
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     let tolerance: Float = 0.001
     // 99 most recent committed bars: indices 6..104 (peaks 0.063..0.945)
     assert(abs(peaks[0] - 0.063) < tolerance, "oldest visible bar = 0.063, got \(peaks[0])")
@@ -601,7 +601,7 @@ func testBarPeakAfterDrain() {
     let buf = CircularAudioBuffer(durationSeconds: 1, sampleRate: 1000)
     buf.write([Float](repeating: 0.5, count: 20)) // 2 committed bars
     _ = buf.drain()
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
     for i in 0..<100 {
         assert(peaks[i] == 0, "bar \(i) should be 0 after drain, got \(peaks[i])")
     }
@@ -641,8 +641,8 @@ func testMicOnlyWaveform() {
     let micSamples = sineWave(seconds: 0.5, sampleRate: 1000, frequency: 100)
     micBuffer.write(micSamples)
 
-    let sysRaw = sysBuffer.getBarPeaks()
-    let micRaw = micBuffer.getBarPeaks()
+    let sysRaw = sysBuffer.getBarPeaks().peaks
+    let micRaw = micBuffer.getBarPeaks().peaks
 
     // Merge with max (same as RecordingManager.startWaveformTimer)
     var merged = [Float](repeating: 0, count: 100)
@@ -668,8 +668,8 @@ func testBothSourcesMerge() {
     sysBuffer.write([Float](repeating: 0.3, count: 200))
     micBuffer.write([Float](repeating: 0.7, count: 200))
 
-    let sysRaw = sysBuffer.getBarPeaks()
-    let micRaw = micBuffer.getBarPeaks()
+    let sysRaw = sysBuffer.getBarPeaks().peaks
+    let micRaw = micBuffer.getBarPeaks().peaks
 
     var merged = [Float](repeating: 0, count: 100)
     for i in 0..<100 {
@@ -690,8 +690,8 @@ func testWaveformDirectAssignment() {
     sysBuffer.write([Float](repeating: 0.3, count: 200))
     micBuffer.write([Float](repeating: 0.7, count: 200))
 
-    let sysRaw = sysBuffer.getBarPeaks()
-    let micRaw = micBuffer.getBarPeaks()
+    let sysRaw = sysBuffer.getBarPeaks().peaks
+    let micRaw = micBuffer.getBarPeaks().peaks
 
     // Merge with max (same as RecordingManager)
     var raw = [Float](repeating: 0, count: 100)
@@ -731,7 +731,7 @@ func testMicSineWaveBarPeaks() {
     // 50Hz at 1000Hz SR → period = 20 samples. 100 samples/bar → 5 full periods per bar.
     // Peak of sin = 1.0, so each committed bar peak should be ~1.0
     buf.write(samples)
-    let peaks = buf.getBarPeaks()
+    let peaks = buf.getBarPeaks().peaks
 
     // 1000 samples / 100 per bar = 10 committed bars
     // Bars should be at indices 89..98, live bar at 99 (empty since exact multiple)
@@ -751,8 +751,8 @@ func testMicWeakSignalStillVisible() {
     for i in stride(from: 0, to: 200, by: 10) { quietMic[i] = 0.02 }
     micBuffer.write(quietMic)
 
-    let sysRaw = sysBuffer.getBarPeaks()
-    let micRaw = micBuffer.getBarPeaks()
+    let sysRaw = sysBuffer.getBarPeaks().peaks
+    let micRaw = micBuffer.getBarPeaks().peaks
 
     var merged = [Float](repeating: 0, count: 100)
     for i in 0..<100 {
