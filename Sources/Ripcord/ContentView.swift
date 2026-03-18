@@ -688,7 +688,7 @@ private struct RecordingRowView: View {
                             pendingTranscriptionConfig = manager.transcriptionConfig
                             transcribeTarget = recording
                         }) {
-                            Image(systemName: transcriptExists() ? "arrow.triangle.2.circlepath" : "waveform")
+                            Image(systemName: transcriptExists() ? "arrow.triangle.2.circlepath" : "text.quote")
                                 .font(.body)
                                 .foregroundStyle(.secondary)
                         }

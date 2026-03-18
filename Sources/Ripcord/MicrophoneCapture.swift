@@ -26,6 +26,10 @@ private func micInputCallback(
 final class MicrophoneCapture: @unchecked Sendable {
     private var audioUnit: AudioComponentInstance?
     private let stateLock = NSLock()
+    // All CoreAudio calls (teardown, restart, listener callbacks) run here — never on main.
+    // CoreAudio property changes synchronously notify coreaudiod, which can block for 1-2s.
+    // Running on main would stall the UI and block other apps' audio negotiation.
+    private let audioQueue = DispatchQueue(label: "com.vibe.ripcord.micCapture")
     private var _isRunning = false
     private var currentDeviceID: AudioDeviceID?
     private var restartWorkItem: DispatchWorkItem?
@@ -200,18 +204,23 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     private func tearDownAudioUnit() {
-        if let unit = audioUnit {
-            // Nil audioUnit BEFORE stopping so in-flight IO callbacks
-            // early-return via `guard let audioUnit` instead of calling
-            // AudioUnitRender on a unit that's mid-teardown.
-            audioUnit = nil
+        // Atomically claim the unit and converter so that concurrent calls
+        // from stop() (main) and handleDeviceChange (audioQueue) don't
+        // double-dispose.
+        stateLock.lock()
+        let unit = audioUnit
+        audioUnit = nil
+        let conv = converter
+        converter = nil
+        stateLock.unlock()
+
+        if let unit {
             AudioOutputUnitStop(unit)
             AudioUnitUninitialize(unit)
             AudioComponentInstanceDispose(unit)
         }
-        if let converter {
-            AudioConverterDispose(converter)
-            self.converter = nil
+        if let conv {
+            AudioConverterDispose(conv)
         }
     }
 
@@ -382,7 +391,7 @@ final class MicrophoneCapture: @unchecked Sendable {
             self?.handleDeviceChange(reason: "device unplugged")
         }
         deviceAliveListener = aliveBlock
-        AudioObjectAddPropertyListenerBlock(deviceID, &aliveAddress, DispatchQueue.main, aliveBlock)
+        AudioObjectAddPropertyListenerBlock(deviceID, &aliveAddress, audioQueue, aliveBlock)
 
         // When using the system default, also listen for the default changing
         if currentDeviceID == nil {
@@ -396,7 +405,7 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
             defaultInputListener = defaultBlock
             AudioObjectAddPropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &defaultAddress, DispatchQueue.main, defaultBlock
+                AudioObjectID(kAudioObjectSystemObject), &defaultAddress, audioQueue, defaultBlock
             )
         }
     }
@@ -408,7 +417,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain
             )
-            AudioObjectRemovePropertyListenerBlock(listeningDeviceID, &address, DispatchQueue.main, block)
+            AudioObjectRemovePropertyListenerBlock(listeningDeviceID, &address, audioQueue, block)
             deviceAliveListener = nil
         }
 
@@ -419,7 +428,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 mElement: kAudioObjectPropertyElementMain
             )
             AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
+                AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
             )
             defaultInputListener = nil
         }
@@ -428,6 +437,22 @@ final class MicrophoneCapture: @unchecked Sendable {
     private func handleDeviceChange(reason: String) {
         logger.error("Device change (\(reason)), scheduling restart")
 
+        // Debounce: reset the 2s timer on every event. The AUHAL keeps
+        // running during the storm (render errors are harmless) so we
+        // don't churn coreaudiod with stop/start cycles that block other
+        // apps' audio negotiation. Only after 2s of quiet do we do a
+        // single clean teardown + restart.
+        restartWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.performDebouncedRestart()
+        }
+        restartWorkItem = work
+        audioQueue.asyncAfter(deadline: .now() + 2.0, execute: work)
+    }
+
+    private static let maxRestartAttempts = 5
+
+    private func performDebouncedRestart(attempt: Int = 1) {
         removeDeviceListeners()
 
         stateLock.lock()
@@ -438,36 +463,29 @@ final class MicrophoneCapture: @unchecked Sendable {
         guard wasRunning else { return }
 
         tearDownAudioUnit()
-        scheduleRestart(delay: 2.0)
-    }
 
-    private static let maxRestartAttempts = 5
-
-    private func scheduleRestart(delay: TimeInterval, attempt: Int = 1) {
-        restartWorkItem?.cancel()
-        let work = DispatchWorkItem { [weak self] in
-            guard let self else { return }
-            do {
-                try self.start(deviceID: self.currentDeviceID)
-                logger.error("Mic restarted successfully (attempt \(attempt))")
-            } catch {
-                if self.currentDeviceID != nil {
-                    do {
-                        try self.start(deviceID: nil)
-                        logger.error("Mic restarted on system default (attempt \(attempt))")
-                        return
-                    } catch {}
+        do {
+            try start(deviceID: currentDeviceID)
+            logger.error("Mic restarted successfully (attempt \(attempt))")
+        } catch {
+            if currentDeviceID != nil {
+                do {
+                    try start(deviceID: nil)
+                    logger.error("Mic restarted on system default (attempt \(attempt))")
+                    return
+                } catch {}
+            }
+            if attempt < Self.maxRestartAttempts {
+                logger.error("Mic not ready (attempt \(attempt)), retrying in 2s")
+                let work = DispatchWorkItem { [weak self] in
+                    self?.performDebouncedRestart(attempt: attempt + 1)
                 }
-                if attempt < Self.maxRestartAttempts {
-                    logger.error("Mic not ready (attempt \(attempt)), retrying in 2s")
-                    self.scheduleRestart(delay: 2.0, attempt: attempt + 1)
-                } else {
-                    logger.error("Mic restart failed after \(attempt) attempts: \(error.localizedDescription)")
-                }
+                restartWorkItem = work
+                audioQueue.asyncAfter(deadline: .now() + 2.0, execute: work)
+            } else {
+                logger.error("Mic restart failed after \(attempt) attempts: \(error.localizedDescription)")
             }
         }
-        restartWorkItem = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
     }
 
     // MARK: - Helpers

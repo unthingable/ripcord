@@ -12,6 +12,7 @@ final class AudioDeviceEnumerator {
     var inputDevices: [AudioInputDevice] = []
 
     private var listenerBlock: AudioObjectPropertyListenerBlock?
+    private let audioQueue = DispatchQueue(label: "com.vibe.ripcord.deviceEnum")
 
     init() {
         refresh()
@@ -23,6 +24,12 @@ final class AudioDeviceEnumerator {
     }
 
     func refresh() {
+        inputDevices = computeDevices()
+    }
+
+    /// Query CoreAudio for all input devices. Pure computation, no UI side effects.
+    /// Safe to call from any queue.
+    private func computeDevices() -> [AudioInputDevice] {
         var address = AudioObjectPropertyAddress(
             mSelector: kAudioHardwarePropertyDevices,
             mScope: kAudioObjectPropertyScopeGlobal,
@@ -33,20 +40,14 @@ final class AudioDeviceEnumerator {
         var status = AudioObjectGetPropertyDataSize(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize
         )
-        guard status == noErr, dataSize > 0 else {
-            inputDevices = []
-            return
-        }
+        guard status == noErr, dataSize > 0 else { return [] }
 
         let deviceCount = Int(dataSize) / MemoryLayout<AudioDeviceID>.size
         var deviceIDs = [AudioDeviceID](repeating: 0, count: deviceCount)
         status = AudioObjectGetPropertyData(
             AudioObjectID(kAudioObjectSystemObject), &address, 0, nil, &dataSize, &deviceIDs
         )
-        guard status == noErr else {
-            inputDevices = []
-            return
-        }
+        guard status == noErr else { return [] }
 
         var result: [AudioInputDevice] = []
         for devID in deviceIDs {
@@ -58,7 +59,7 @@ final class AudioDeviceEnumerator {
         }
 
         result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
-        inputDevices = result
+        return result
     }
 
     func deviceID(forUID uid: String) -> AudioDeviceID? {
@@ -109,14 +110,17 @@ final class AudioDeviceEnumerator {
         let block: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             guard let self else { return }
             nonisolated(unsafe) let s = self
+            // CoreAudio queries run here on audioQueue (off main).
+            // Only the final inputDevices assignment goes to main.
+            let devices = s.computeDevices()
             DispatchQueue.main.async {
-                s.refresh()
+                s.inputDevices = devices
             }
         }
         listenerBlock = block
 
         AudioObjectAddPropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
+            AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
         )
     }
 
@@ -128,7 +132,7 @@ final class AudioDeviceEnumerator {
             mElement: kAudioObjectPropertyElementMain
         )
         AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, DispatchQueue.main, block
+            AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
         )
         listenerBlock = nil
     }
