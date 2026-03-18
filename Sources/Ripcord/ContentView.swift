@@ -49,7 +49,7 @@ struct ContentView: View {
             Divider()
 
             HStack {
-                if manager.transcriptionService.modelsReady {
+                if manager.transcriptionService.modelsLoaded {
                     Button("Transcribe File\u{2026}") {
                         let panel = NSOpenPanel()
                         panel.allowedContentTypes = [.wav, .audio]
@@ -61,6 +61,7 @@ struct ContentView: View {
                         }
                     }
                     .font(.caption)
+                    .disabled(manager.transcriptionService.isTranscribing)
                     .popover(isPresented: $showFileTranscribePopover, arrowEdge: .top) {
                         TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
                             showFileTranscribePopover = false
@@ -682,8 +683,10 @@ private struct RecordingRowView: View {
                     .help("Rename")
 
                     if manager.transcriptionService.transcribingURL == recording.url {
-                        ProgressView().controlSize(.small)
-                    } else if manager.transcriptionService.modelsReady {
+                        CancelableSpinner {
+                            manager.transcriptionService.cancelTranscription()
+                        }
+                    } else if manager.transcriptionService.modelsLoaded {
                         Button(action: {
                             pendingTranscriptionConfig = manager.transcriptionConfig
                             transcribeTarget = recording
@@ -693,6 +696,7 @@ private struct RecordingRowView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
+                        .disabled(manager.transcriptionService.isTranscribing)
                         .help(transcriptExists() ? "Re-transcribe" : "Transcribe")
                         .popover(isPresented: Binding(
                             get: { transcribeTarget?.url == recording.url },
@@ -740,6 +744,31 @@ private struct RecordingRowView: View {
             }
         }
         return false
+    }
+}
+
+// MARK: - Cancelable Spinner
+
+/// A progress spinner that becomes a cancel button on hover.
+private struct CancelableSpinner: View {
+    var onCancel: () -> Void
+    @State private var isHovered = false
+
+    var body: some View {
+        Button(action: onCancel) {
+            ZStack {
+                ProgressView()
+                    .controlSize(.small)
+                    .opacity(isHovered ? 0 : 1)
+                Image(systemName: "stop.fill")
+                    .font(.body)
+                    .foregroundStyle(.secondary)
+                    .opacity(isHovered ? 1 : 0)
+            }
+        }
+        .buttonStyle(.plain)
+        .help("Cancel transcription")
+        .onHover { isHovered = $0 }
     }
 }
 

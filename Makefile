@@ -15,7 +15,7 @@ TEST_SOURCES = Tests/test_components.swift \
 build:
 	swift build -c release
 
-BIN_PATH = $(shell swift build -c release --show-bin-path)
+BIN_PATH = .build/$(shell uname -m)-apple-macosx/release
 
 bundle: build
 	rm -rf $(BUNDLE)

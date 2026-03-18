@@ -17,8 +17,11 @@ final class TranscriptionService: @unchecked Sendable {
     var transcribingURL: URL?
 
     var modelsReady: Bool { state == .ready }
+    var modelsLoaded: Bool { state == .ready || state == .transcribing }
+    var isTranscribing: Bool { state == .transcribing }
 
     private var transcriber = Transcriber()
+    private var transcriptionTask: Task<Void, Never>?
 
     // MARK: - Model Lifecycle
 
@@ -55,7 +58,23 @@ final class TranscriptionService: @unchecked Sendable {
 
     // MARK: - Transcription Pipeline
 
-    func transcribe(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) async throws -> URL {
+    func startTranscription(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) {
+        transcriptionTask?.cancel()
+        transcriptionTask = Task {
+            _ = try? await self.transcribe(fileURL: fileURL, config: config, overwrite: overwrite)
+            self.transcriptionTask = nil
+        }
+    }
+
+    @MainActor
+    func cancelTranscription() {
+        transcriptionTask?.cancel()
+        transcriptionTask = nil
+        state = .ready
+        transcribingURL = nil
+    }
+
+    private func transcribe(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) async throws -> URL {
         guard modelsReady, transcriber.isReady else {
             throw TranscriptionError.modelsNotReady
         }
@@ -103,10 +122,18 @@ final class TranscriptionService: @unchecked Sendable {
             let transcriptURL = overwrite ? baseTranscriptURL : uniqueFileURL(for: baseTranscriptURL)
             try formatted.write(to: transcriptURL, atomically: true, encoding: .utf8)
 
-            await MainActor.run { state = .ready; transcribingURL = nil }
+            await MainActor.run {
+                if transcribingURL == fileURL {
+                    state = .ready; transcribingURL = nil
+                }
+            }
             return transcriptURL
         } catch {
-            await MainActor.run { state = .ready; transcribingURL = nil }
+            await MainActor.run {
+                if transcribingURL == fileURL {
+                    state = .ready; transcribingURL = nil
+                }
+            }
             throw error
         }
     }

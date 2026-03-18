@@ -68,10 +68,13 @@ public final class Transcriber: @unchecked Sendable {
         defer { cleanup() }
 
         let audioDuration = AudioPreprocessor.getAudioDuration(processURL)
+        try Task.checkCancellation()
 
         // ASR
         let asrResult = try await asr.transcribe(processURL)
         let duration = asrResult.duration > 0 ? asrResult.duration : audioDuration
+
+        try Task.checkCancellation()
 
         // Diarization
         var diarizationResult: DiarizationResult?
@@ -114,6 +117,8 @@ public final class Transcriber: @unchecked Sendable {
             try await diarizer.prepareModels()
             diarizationResult = try await diarizer.process(processURL)
         }
+
+        try Task.checkCancellation()
 
         // Merge
         let removeFillers = diarization?.removeFillerWords ?? false
