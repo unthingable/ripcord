@@ -709,6 +709,137 @@ test("3-word cap: no punctuation within 3 words means no heal") {
     assertEqual(words[1].speaker, "B", "very should stay B (punctuation beyond 3-word cap)")
 }
 
+// MARK: - SpeakerMatcher Tests
+
+/// Helper to make a normalized embedding with a dominant dimension.
+func makeEmbedding(dim: Int, size: Int = 8) -> [Float] {
+    var v = [Float](repeating: 0, count: size)
+    v[dim % size] = 1.0
+    return v
+}
+
+/// Helper to make a slightly noisy version of an embedding (still very similar).
+func perturbEmbedding(_ base: [Float], noise: Float = 0.05) -> [Float] {
+    var v = base
+    for i in 0..<v.count {
+        v[i] += noise * Float(i % 3 == 0 ? 1 : -1)
+    }
+    // L2-normalize
+    var norm: Float = 0
+    for val in v { norm += val * val }
+    norm = sqrt(norm)
+    if norm > 0 { for i in 0..<v.count { v[i] /= norm } }
+    return v
+}
+
+print("\nSpeakerMatcher:")
+
+test("Cosine similarity of identical vectors is 1") {
+    let a = makeEmbedding(dim: 0)
+    let sim = SpeakerMatcher.cosineSimilarity(a, a)
+    assert(abs(sim - 1.0) < 0.001, "expected ~1.0, got \(sim)")
+}
+
+test("Cosine similarity of orthogonal vectors is 0") {
+    let a = makeEmbedding(dim: 0)
+    let b = makeEmbedding(dim: 1)
+    let sim = SpeakerMatcher.cosineSimilarity(a, b)
+    assert(abs(sim) < 0.001, "expected ~0.0, got \(sim)")
+}
+
+test("Match returns correct speaker for high-similarity embedding") {
+    let embA = makeEmbedding(dim: 0)
+    let embB = makeEmbedding(dim: 1)
+    let profiles = [
+        SpeakerProfile(name: "Alice", embedding: embA),
+        SpeakerProfile(name: "Bob", embedding: embB),
+    ]
+    let newEmbeddings = [
+        "SPEAKER_0": perturbEmbedding(embA),
+        "SPEAKER_1": perturbEmbedding(embB),
+    ]
+    let result = SpeakerMatcher.match(embeddings: newEmbeddings, profiles: profiles)
+    assertEqual(result.matched["SPEAKER_0"]?.name, "Alice", "SPEAKER_0 should match Alice")
+    assertEqual(result.matched["SPEAKER_1"]?.name, "Bob", "SPEAKER_1 should match Bob")
+    assert(result.unmatched.isEmpty, "no unmatched speakers expected")
+}
+
+test("Unmatched speakers are returned when no profile matches") {
+    let profiles = [
+        SpeakerProfile(name: "Alice", embedding: makeEmbedding(dim: 0)),
+    ]
+    let newEmbeddings = [
+        "SPEAKER_0": makeEmbedding(dim: 3),  // orthogonal, won't match
+    ]
+    let result = SpeakerMatcher.match(embeddings: newEmbeddings, profiles: profiles)
+    assert(result.matched.isEmpty, "no matches expected for orthogonal embedding")
+    assertEqual(result.unmatched.count, 1, "one unmatched speaker")
+}
+
+test("Greedy assignment: each profile matches at most once") {
+    // Both new speakers are similar to profile A, but SPEAKER_0 is closer
+    let embA = makeEmbedding(dim: 0)
+    let profiles = [
+        SpeakerProfile(name: "Alice", embedding: embA),
+    ]
+    let newEmbeddings = [
+        "SPEAKER_0": perturbEmbedding(embA, noise: 0.01),  // very close
+        "SPEAKER_1": perturbEmbedding(embA, noise: 0.1),   // less close
+    ]
+    let result = SpeakerMatcher.match(embeddings: newEmbeddings, profiles: profiles)
+    assertEqual(result.matched.count, 1, "only one should match")
+    assertEqual(result.unmatched.count, 1, "one should be unmatched")
+    // The closer one should get the match
+    assert(result.matched["SPEAKER_0"]?.name == "Alice" || result.matched["SPEAKER_1"]?.name == "Alice",
+           "one speaker should match Alice")
+}
+
+test("Empty profiles yields all unmatched") {
+    let result = SpeakerMatcher.match(
+        embeddings: ["S0": makeEmbedding(dim: 0)],
+        profiles: [])
+    assert(result.matched.isEmpty, "no matches with empty profiles")
+    assertEqual(result.unmatched.count, 1, "all speakers unmatched")
+}
+
+test("Empty embeddings yields empty result") {
+    let profiles = [SpeakerProfile(name: "Alice", embedding: makeEmbedding(dim: 0))]
+    let result = SpeakerMatcher.match(embeddings: [:], profiles: profiles)
+    assert(result.matched.isEmpty, "no matches with empty embeddings")
+    assert(result.unmatched.isEmpty, "no unmatched with empty embeddings")
+}
+
+test("remapSegments substitutes matched speaker names") {
+    let segments = [
+        TranscriptSegment(start: 0, end: 5, text: "Hello", speaker: "SPEAKER_0"),
+        TranscriptSegment(start: 5, end: 10, text: "World", speaker: "SPEAKER_1"),
+        TranscriptSegment(start: 10, end: 15, text: "Hmm", speaker: nil),
+    ]
+    let mapping = ["SPEAKER_0": "Alice"]
+    let remapped = SpeakerMatcher.remapSegments(segments, mapping: mapping)
+    assertEqual(remapped[0].speaker, "Alice", "SPEAKER_0 should become Alice")
+    assertEqual(remapped[1].speaker, "SPEAKER_1", "SPEAKER_1 stays unchanged")
+    assertNil(remapped[2].speaker, "nil speaker stays nil")
+}
+
+test("Threshold filters low-similarity matches") {
+    // Create embeddings that are somewhat similar but below 0.75 threshold
+    var embA: [Float] = [1.0, 0.3, 0, 0, 0, 0, 0, 0]
+    var embB: [Float] = [0.3, 1.0, 0, 0, 0, 0, 0, 0]
+    // Normalize
+    let normA = sqrt(embA.reduce(0) { $0 + $1 * $1 })
+    let normB = sqrt(embB.reduce(0) { $0 + $1 * $1 })
+    embA = embA.map { $0 / normA }
+    embB = embB.map { $0 / normB }
+    let sim = SpeakerMatcher.cosineSimilarity(embA, embB)
+    assert(sim > 0 && sim < 0.75, "similarity should be positive but below threshold, got \(sim)")
+
+    let profiles = [SpeakerProfile(name: "Alice", embedding: embA)]
+    let result = SpeakerMatcher.match(embeddings: ["S0": embB], profiles: profiles)
+    assert(result.matched.isEmpty, "below-threshold similarity should not match")
+    assertEqual(result.unmatched.count, 1, "should be unmatched")
+}
+
 // MARK: - Summary
 
 print("\n\(passed) passed, \(failed) failed")

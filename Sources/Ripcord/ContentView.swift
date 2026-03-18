@@ -1,3 +1,4 @@
+import AVFoundation
 import SwiftUI
 import TranscribeKit
 import UniformTypeIdentifiers
@@ -616,6 +617,7 @@ private struct RecordingRowView: View {
     @Binding var pendingTranscriptionConfig: TranscriptionConfig
 
     @State private var isHovered = false
+    @State private var showSpeakerNaming = false
     @FocusState private var renameFieldFocused: Bool
 
     var body: some View {
@@ -673,6 +675,26 @@ private struct RecordingRowView: View {
             }
 
             if renamingURL != recording.url {
+                if let unmatched = manager.transcriptionService.unmatchedSpeakers[recording.url],
+                   !unmatched.isEmpty {
+                    Button(action: { showSpeakerNaming = true }) {
+                        Text("\(unmatched.count) new")
+                            .font(.caption2)
+                            .padding(.horizontal, 5)
+                            .padding(.vertical, 1)
+                            .background(Capsule().fill(.blue.opacity(0.2)))
+                            .foregroundStyle(.blue)
+                    }
+                    .buttonStyle(.plain)
+                    .help("Name new speakers")
+                    .popover(isPresented: $showSpeakerNaming, arrowEdge: .trailing) {
+                        SpeakerNamingPopover(
+                            fileURL: recording.url,
+                            service: manager.transcriptionService
+                        )
+                    }
+                }
+
                 HStack(spacing: 6) {
                     Button(action: startRenaming) {
                         Image(systemName: "pencil")
@@ -769,6 +791,101 @@ private struct CancelableSpinner: View {
         .buttonStyle(.plain)
         .help("Cancel transcription")
         .onHover { isHovered = $0 }
+    }
+}
+
+// MARK: - Speaker Naming Popover
+
+private struct SpeakerNamingPopover: View {
+    let fileURL: URL
+    let service: TranscriptionService
+
+    @State private var player: AVAudioPlayer?
+    @State private var playingSpeaker: String?
+    @State private var stopTimer: Timer?
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 8) {
+            Text("Name New Speakers")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+
+            if let speakers = service.unmatchedSpeakers[fileURL] {
+                ForEach(Array(speakers.enumerated()), id: \.element.id) { index, speaker in
+                    HStack(spacing: 6) {
+                        Button(action: { playSample(speakerID: speaker.id) }) {
+                            Image(systemName: playingSpeaker == speaker.id ? "stop.fill" : "play.fill")
+                                .font(.caption)
+                                .foregroundStyle(.blue)
+                                .frame(width: 14)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Play sample")
+
+                        Text(speaker.id)
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .frame(width: 80, alignment: .leading)
+                        TextField("Name", text: Binding(
+                            get: { service.unmatchedSpeakers[fileURL]?[index].name ?? "" },
+                            set: { service.unmatchedSpeakers[fileURL]?[index].name = $0 }
+                        ))
+                        .textFieldStyle(.roundedBorder)
+                        .font(.caption)
+                    }
+                }
+            }
+
+            HStack {
+                Button("Skip") {
+                    stopPlayback()
+                    service.skipNaming(for: fileURL)
+                }
+                .keyboardShortcut(.cancelAction)
+                Spacer()
+                Button("Save") {
+                    stopPlayback()
+                    service.saveNewSpeakerProfiles(for: fileURL)
+                }
+                .keyboardShortcut(.defaultAction)
+            }
+        }
+        .padding(10)
+        .frame(width: 280)
+        .onDisappear { stopPlayback() }
+    }
+
+    private func playSample(speakerID: String) {
+        // If already playing this speaker, stop
+        if playingSpeaker == speakerID {
+            stopPlayback()
+            return
+        }
+
+        stopPlayback()
+
+        guard let range = service.randomSegmentRange(for: speakerID, fileURL: fileURL),
+              let audioPlayer = try? AVAudioPlayer(contentsOf: fileURL) else { return }
+
+        audioPlayer.currentTime = range.start
+        audioPlayer.play()
+        player = audioPlayer
+        playingSpeaker = speakerID
+
+        let duration = range.end - range.start
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [self] _ in
+            MainActor.assumeIsolated {
+                self.stopPlayback()
+            }
+        }
+    }
+
+    private func stopPlayback() {
+        stopTimer?.invalidate()
+        stopTimer = nil
+        player?.stop()
+        player = nil
+        playingSpeaker = nil
     }
 }
 

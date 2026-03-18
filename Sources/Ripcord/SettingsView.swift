@@ -239,6 +239,36 @@ struct SettingsView: View {
             }
             .disabled(!manager.transcriptionConfig.diarizationEnabled)
 
+            if manager.transcriptionConfig.diarizationEnabled {
+                Text("Speakers merged? Raise sensitivity or set speaker count.\nToo many speakers? Lower sensitivity.\nFor 2-person calls, set speakers to 2.")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+            }
+
+            if !manager.speakerProfileStore.profiles.isEmpty {
+                DisclosureGroup("Saved Speakers (\(manager.speakerProfileStore.profiles.count))") {
+                    ForEach(manager.speakerProfileStore.profiles) { profile in
+                        HStack {
+                            Text(profile.name)
+                                .font(.caption)
+                            Spacer()
+                            Text("\(profile.observationCount)x")
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                            Button(role: .destructive) {
+                                manager.speakerProfileStore.removeProfile(id: profile.id)
+                            } label: {
+                                Image(systemName: "trash")
+                                    .font(.caption)
+                                    .foregroundStyle(.secondary)
+                            }
+                            .buttonStyle(.plain)
+                            .help("Delete speaker profile")
+                        }
+                    }
+                }
+            }
+
             DisclosureGroup("Advanced") {
                 HStack {
                     Text("Speech threshold")

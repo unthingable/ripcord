@@ -93,6 +93,22 @@ public enum OutputFormat: String, CaseIterable, Sendable {
     case txt, md, json, srt, vtt
 }
 
+// MARK: - Speaker Identity
+
+public struct SpeakerProfile: Codable, Sendable, Identifiable {
+    public let id: UUID
+    public var name: String
+    public var embedding: [Float]
+    public var observationCount: Int
+
+    public init(id: UUID = UUID(), name: String, embedding: [Float], observationCount: Int = 1) {
+        self.id = id
+        self.name = name
+        self.embedding = embedding
+        self.observationCount = observationCount
+    }
+}
+
 // MARK: - Transcription Result
 
 public struct TranscriptionResult: Sendable {
@@ -100,11 +116,13 @@ public struct TranscriptionResult: Sendable {
     public let duration: TimeInterval
     public let speakers: [String]
     public let text: String
+    public let speakerEmbeddings: [String: [Float]]?
 
-    public init(segments: [TranscriptSegment], duration: TimeInterval, speakers: [String]) {
+    public init(segments: [TranscriptSegment], duration: TimeInterval, speakers: [String], speakerEmbeddings: [String: [Float]]? = nil) {
         self.segments = segments
         self.duration = duration
         self.speakers = speakers
         self.text = segments.map(\.text).joined(separator: " ")
+        self.speakerEmbeddings = speakerEmbeddings
     }
 }

@@ -143,7 +143,7 @@ public final class Transcriber: @unchecked Sendable {
             speakers = []
         }
 
-        return TranscriptionResult(segments: segments, duration: duration, speakers: speakers)
+        return TranscriptionResult(segments: segments, duration: duration, speakers: speakers, speakerEmbeddings: diarizationResult?.speakerDatabase)
     }
 
     public func cleanup() {

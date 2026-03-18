@@ -106,6 +106,7 @@ final class RecordingManager: @unchecked Sendable {
     var nameHistory: [String] = []
 
     let transcriptionService = TranscriptionService()
+    private(set) var speakerProfileStore: SpeakerProfileStore
     let deviceEnumerator = AudioDeviceEnumerator()
 
     private let systemCapture = SystemAudioCapture()
@@ -187,11 +188,16 @@ final class RecordingManager: @unchecked Sendable {
         systemBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
         micBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
 
+        let resolvedDir: URL
         if let dirPath = defaults.string(forKey: SettingsKey.outputDirectory), !dirPath.isEmpty {
-            outputDirectory = URL(fileURLWithPath: dirPath, isDirectory: true)
+            resolvedDir = URL(fileURLWithPath: dirPath, isDirectory: true)
         } else {
-            outputDirectory = defaultDir
+            resolvedDir = defaultDir
         }
+        outputDirectory = resolvedDir
+
+        speakerProfileStore = SpeakerProfileStore(directory: resolvedDir)
+        transcriptionService.speakerProfileStore = speakerProfileStore
 
         bufferDurationSeconds = duration
 
@@ -330,7 +336,10 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         await loadRecentRecordings()
-        await MainActor.run { startDirectoryMonitor() }
+        await MainActor.run {
+            transcriptionService.loadPendingSpeakers(in: outputDirectory)
+            startDirectoryMonitor()
+        }
 
         if !transcriptionService.modelsReady
             && TranscriptionService.modelsExistOnDisk(config: transcriptionConfig) {
@@ -729,6 +738,8 @@ final class RecordingManager: @unchecked Sendable {
     func updateOutputDirectory(_ url: URL) {
         outputDirectory = url
         UserDefaults.standard.set(url.path, forKey: SettingsKey.outputDirectory)
+        speakerProfileStore = SpeakerProfileStore(directory: url)
+        transcriptionService.speakerProfileStore = speakerProfileStore
         startDirectoryMonitor()
         Task { await loadRecentRecordings() }
     }
