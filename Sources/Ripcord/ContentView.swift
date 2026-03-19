@@ -811,7 +811,7 @@ private struct SpeakerNamingPopover: View {
                 .foregroundStyle(.secondary)
 
             if let speakers = service.unmatchedSpeakers[fileURL] {
-                ForEach(Array(speakers.enumerated()), id: \.element.id) { index, speaker in
+                ForEach(speakers) { speaker in
                     HStack(spacing: 6) {
                         Button(action: { playSample(speakerID: speaker.id) }) {
                             Image(systemName: playingSpeaker == speaker.id ? "stop.fill" : "play.fill")
@@ -827,8 +827,13 @@ private struct SpeakerNamingPopover: View {
                             .foregroundStyle(.secondary)
                             .frame(width: 80, alignment: .leading)
                         TextField("Name", text: Binding(
-                            get: { service.unmatchedSpeakers[fileURL]?[index].name ?? "" },
-                            set: { service.unmatchedSpeakers[fileURL]?[index].name = $0 }
+                            get: {
+                                service.unmatchedSpeakers[fileURL]?.first(where: { $0.id == speaker.id })?.name ?? ""
+                            },
+                            set: { newValue in
+                                guard let idx = service.unmatchedSpeakers[fileURL]?.firstIndex(where: { $0.id == speaker.id }) else { return }
+                                service.unmatchedSpeakers[fileURL]?[idx].name = newValue
+                            }
                         ))
                         .textFieldStyle(.roundedBorder)
                         .font(.caption)
@@ -873,8 +878,8 @@ private struct SpeakerNamingPopover: View {
         playingSpeaker = speakerID
 
         let duration = range.end - range.start
-        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { [self] _ in
-            MainActor.assumeIsolated {
+        stopTimer = Timer.scheduledTimer(withTimeInterval: duration, repeats: false) { _ in
+            Task { @MainActor in
                 self.stopPlayback()
             }
         }

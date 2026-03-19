@@ -14,8 +14,9 @@ final class SpeakerProfileStore {
     }
 
     func load() {
-        guard let data = try? Data(contentsOf: fileURL) else { return }
-        guard let decoded = try? JSONDecoder().decode([SpeakerProfile].self, from: data) else { return }
+        guard let data = try? Data(contentsOf: fileURL),
+              let decoded = try? JSONDecoder().decode([SpeakerProfile].self, from: data)
+        else { return }
         profiles = decoded
     }
 
@@ -48,15 +49,7 @@ final class SpeakerProfileStore {
             averaged[i] = (old[i] * count + newEmbedding[i]) / (count + 1)
         }
 
-        // L2-normalize
-        var norm: Float = 0
-        for v in averaged { norm += v * v }
-        norm = sqrt(norm)
-        if norm > 0 {
-            for i in 0..<averaged.count { averaged[i] /= norm }
-        }
-
-        profiles[idx].embedding = averaged
+        profiles[idx].embedding = SpeakerMatcher.l2Normalize(averaged)
         profiles[idx].observationCount += 1
         save()
     }

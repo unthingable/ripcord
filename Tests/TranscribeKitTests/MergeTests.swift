@@ -724,12 +724,7 @@ func perturbEmbedding(_ base: [Float], noise: Float = 0.05) -> [Float] {
     for i in 0..<v.count {
         v[i] += noise * Float(i % 3 == 0 ? 1 : -1)
     }
-    // L2-normalize
-    var norm: Float = 0
-    for val in v { norm += val * val }
-    norm = sqrt(norm)
-    if norm > 0 { for i in 0..<v.count { v[i] /= norm } }
-    return v
+    return SpeakerMatcher.l2Normalize(v)
 }
 
 print("\nSpeakerMatcher:")
@@ -824,13 +819,8 @@ test("remapSegments substitutes matched speaker names") {
 
 test("Threshold filters low-similarity matches") {
     // Create embeddings that are somewhat similar but below 0.75 threshold
-    var embA: [Float] = [1.0, 0.3, 0, 0, 0, 0, 0, 0]
-    var embB: [Float] = [0.3, 1.0, 0, 0, 0, 0, 0, 0]
-    // Normalize
-    let normA = sqrt(embA.reduce(0) { $0 + $1 * $1 })
-    let normB = sqrt(embB.reduce(0) { $0 + $1 * $1 })
-    embA = embA.map { $0 / normA }
-    embB = embB.map { $0 / normB }
+    let embA = SpeakerMatcher.l2Normalize([1.0, 0.3, 0, 0, 0, 0, 0, 0])
+    let embB = SpeakerMatcher.l2Normalize([0.3, 1.0, 0, 0, 0, 0, 0, 0])
     let sim = SpeakerMatcher.cosineSimilarity(embA, embB)
     assert(sim > 0 && sim < 0.75, "similarity should be positive but below threshold, got \(sim)")
 

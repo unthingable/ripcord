@@ -9,8 +9,8 @@ public enum ModelVersion: String, CaseIterable, Sendable {
 // MARK: - Diarization Configuration
 
 public enum DiarizationQuality: String, CaseIterable, Sendable {
-    case fast      // clustering threshold 0.7, otherwise FA defaults
-    case balanced  // clustering threshold 0.7, stepRatio 0.1 (~2x slower)
+    case fast      // FluidAudio defaults (faster, less accurate boundaries)
+    case balanced  // stepRatio 0.05 for denser frames (~2x slower)
 }
 
 public enum SpeakerCount: Sendable, Equatable {

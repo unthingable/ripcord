@@ -239,10 +239,7 @@ final class TranscriptionService: @unchecked Sendable {
             }
             let count = Float(speakers.count)
             for i in 0..<dim { averaged[i] /= count }
-            var norm: Float = 0
-            for v in averaged { norm += v * v }
-            norm = sqrt(norm)
-            if norm > 0 { for i in 0..<dim { averaged[i] /= norm } }
+            averaged = SpeakerMatcher.l2Normalize(averaged)
 
             // Check if a profile with this name already exists — update it instead
             if let existing = store.profiles.first(where: { $0.name == name }) {

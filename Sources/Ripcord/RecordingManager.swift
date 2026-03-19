@@ -740,6 +740,7 @@ final class RecordingManager: @unchecked Sendable {
         UserDefaults.standard.set(url.path, forKey: SettingsKey.outputDirectory)
         speakerProfileStore = SpeakerProfileStore(directory: url)
         transcriptionService.speakerProfileStore = speakerProfileStore
+        transcriptionService.loadPendingSpeakers(in: url)
         startDirectoryMonitor()
         Task { await loadRecentRecordings() }
     }
@@ -1077,9 +1078,7 @@ final class RecordingManager: @unchecked Sendable {
 
         // Silence detection: use the already-computed peak amplitude
         if silenceEnabled {
-            let peak = flushPeak
-
-            if peak < silenceThresholdLocal {
+            if flushPeak < silenceThresholdLocal {
                 silenceSampleCount += max(sys.count, mic.count)
                 if silenceSampleCount >= silenceSampleThreshold {
                     if !silenceDetected {

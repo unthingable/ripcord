@@ -6,6 +6,15 @@ public struct SpeakerMatchResult: Sendable {
 }
 
 public enum SpeakerMatcher {
+    /// L2-normalizes a vector in place; returns the input unchanged if its norm is zero.
+    public static func l2Normalize(_ v: [Float]) -> [Float] {
+        var norm: Float = 0
+        for x in v { norm += x * x }
+        norm = sqrt(norm)
+        guard norm > 0 else { return v }
+        return v.map { $0 / norm }
+    }
+
     /// Cosine similarity between two L2-normalized embeddings (= dot product).
     public static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
