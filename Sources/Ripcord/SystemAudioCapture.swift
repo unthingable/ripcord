@@ -9,6 +9,12 @@ final class SystemAudioCapture: @unchecked Sendable {
     deinit { stop() }
 
     var onSamples: (([Float]) -> Void)?
+
+    /// Called before and after route-change restart so the owner can cycle
+    /// other audio inputs (e.g. mic AUHAL) and avoid IOState escalation.
+    var onWillRestart: (() -> Void)?
+    var onDidRestart: (() async -> Void)?
+
     private var tapID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var ioProcID: AudioDeviceIOProcID?
@@ -198,6 +204,11 @@ final class SystemAudioCapture: @unchecked Sendable {
         // Full teardown runs on the cooperative thread pool, not main.
         guard !Task.isCancelled else { return }
 
+        // Stop other input sessions (mic AUHAL) BEFORE our teardown so that
+        // IOState goes through [0, 0] instead of [1, 0] → [2, 0].
+        // The [2, 0] escalation blocks VoiceProcessingIO in meeting apps.
+        onWillRestart?()
+
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
             _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
             _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
@@ -227,6 +238,9 @@ final class SystemAudioCapture: @unchecked Sendable {
         } catch {
             logger.error("System capture restart failed: \(error.localizedDescription)")
         }
+
+        // Restart other input sessions after our restart completes
+        await onDidRestart?()
     }
 
     // MARK: - I/O Block Handler

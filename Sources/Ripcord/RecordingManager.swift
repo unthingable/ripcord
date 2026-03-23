@@ -316,6 +316,21 @@ final class RecordingManager: @unchecked Sendable {
             self?.handleMicSamples(samples)
         }
 
+        // Coordinate mic AUHAL with system capture restarts.
+        // When the system capture's aggregate device restarts (output device
+        // change), we must also cycle the mic AUHAL so both input sessions
+        // tear down together. Otherwise IOState escalates from [1, 0] to
+        // [2, 0] which blocks VoiceProcessingIO in meeting apps.
+        systemCapture.onWillRestart = { [weak self] in
+            self?.micCapture.stop()
+        }
+        systemCapture.onDidRestart = { [weak self] in
+            guard let self else { return }
+            let wantsMic = await MainActor.run { self.micEnabled }
+            guard wantsMic else { return }
+            await self.startMic()
+        }
+
         // Start system audio capture
         do {
             try await systemCapture.start()
