@@ -33,6 +33,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     private var _isRunning = false
     private var currentDeviceID: AudioDeviceID?
     private var restartWorkItem: DispatchWorkItem?
+    private var restartSuppressed = false
 
     // Device change listeners
     private var deviceAliveListener: AudioObjectPropertyListenerBlock?
@@ -113,9 +114,27 @@ final class MicrophoneCapture: @unchecked Sendable {
             return
         }
         _isRunning = false
+        restartSuppressed = false
         stateLock.unlock()
 
         tearDownAudioUnit()
+    }
+
+    /// Suppress independent restarts. Called when SystemAudioCapture detects
+    /// a route change and will handle the mic restart via the coordinated cycle.
+    func suppressRestart() {
+        stateLock.lock()
+        restartSuppressed = true
+        stateLock.unlock()
+        restartWorkItem?.cancel()
+        restartWorkItem = nil
+        logger.error("Mic restart suppressed (system capture coordinating)")
+    }
+
+    func unsuppressRestart() {
+        stateLock.lock()
+        restartSuppressed = false
+        stateLock.unlock()
     }
 
     // MARK: - Audio Unit Setup
@@ -453,6 +472,14 @@ final class MicrophoneCapture: @unchecked Sendable {
     private static let maxRestartAttempts = 5
 
     private func performDebouncedRestart(attempt: Int = 1) {
+        stateLock.lock()
+        if restartSuppressed {
+            stateLock.unlock()
+            logger.error("Mic restart suppressed, skipping independent restart")
+            return
+        }
+        stateLock.unlock()
+
         removeDeviceListeners()
 
         stateLock.lock()

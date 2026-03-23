@@ -321,11 +321,20 @@ final class RecordingManager: @unchecked Sendable {
         // change), we must also cycle the mic AUHAL so both input sessions
         // tear down together. Otherwise IOState escalates from [1, 0] to
         // [2, 0] which blocks VoiceProcessingIO in meeting apps.
+        //
+        // Suppress the mic's independent restart immediately when a route
+        // change is detected — before the 2s debounce. This prevents the
+        // mic from restarting on its own (via its default-input listener)
+        // before the coordinated cycle runs.
+        systemCapture.onRouteChangeDetected = { [weak self] in
+            self?.micCapture.suppressRestart()
+        }
         systemCapture.onWillRestart = { [weak self] in
             self?.micCapture.stop()
         }
         systemCapture.onDidRestart = { [weak self] in
             guard let self else { return }
+            self.micCapture.unsuppressRestart()
             let wantsMic = await MainActor.run { self.micEnabled }
             guard wantsMic else { return }
             await self.startMic()

@@ -14,6 +14,8 @@ final class SystemAudioCapture: @unchecked Sendable {
     /// other audio inputs (e.g. mic AUHAL) and avoid IOState escalation.
     var onWillRestart: (() -> Void)?
     var onDidRestart: (() async -> Void)?
+    /// Called immediately when a route change is detected, before debouncing.
+    var onRouteChangeDetected: (() -> Void)?
 
     private var tapID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
     private var aggregateDeviceID: AudioObjectID = AudioObjectID(kAudioObjectUnknown)
@@ -186,6 +188,7 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     private func handleRouteChange() {
         logger.error("Output device changed, scheduling recycle")
+        onRouteChangeDetected?()
 
         // Do NO CoreAudio calls on main — they can block for 1-2 seconds
         // (AUHAL SelectDevice) and deadlock the main thread.
