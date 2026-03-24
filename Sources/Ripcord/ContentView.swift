@@ -852,17 +852,19 @@ private struct SpeakerNamingPopover: View {
                             .font(.caption)
                             .foregroundStyle(.secondary)
                             .frame(width: 80, alignment: .leading)
-                        TextField("Name", text: Binding(
-                            get: {
-                                service.unmatchedSpeakers[fileURL]?.first(where: { $0.id == speaker.id })?.name ?? ""
-                            },
-                            set: { newValue in
-                                guard let idx = service.unmatchedSpeakers[fileURL]?.firstIndex(where: { $0.id == speaker.id }) else { return }
-                                service.unmatchedSpeakers[fileURL]?[idx].name = newValue
-                            }
-                        ))
-                        .textFieldStyle(.roundedBorder)
-                        .font(.caption)
+                        SpeakerNameField(
+                            name: Binding(
+                                get: {
+                                    service.unmatchedSpeakers[fileURL]?.first(where: { $0.id == speaker.id })?.name ?? ""
+                                },
+                                set: { newValue in
+                                    guard let idx = service.unmatchedSpeakers[fileURL]?.firstIndex(where: { $0.id == speaker.id }) else { return }
+                                    service.unmatchedSpeakers[fileURL]?[idx].name = newValue
+                                }
+                            ),
+                            embedding: speaker.embedding,
+                            profiles: service.speakerProfileStore?.profiles ?? []
+                        )
                     }
                 }
             }
@@ -917,6 +919,71 @@ private struct SpeakerNamingPopover: View {
         player?.stop()
         player = nil
         playingSpeaker = nil
+    }
+}
+
+// MARK: - Speaker Name Autocomplete Field
+
+/// Text field with similarity-ranked autocomplete suggestions from existing speaker profiles.
+private struct SpeakerNameField: View {
+    @Binding var name: String
+    let embedding: [Float]
+    let profiles: [SpeakerProfile]
+
+    @State private var showSuggestions = false
+    @State private var rankedNames: [String] = []
+    @FocusState private var isFocused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 0) {
+            TextField("Name", text: $name)
+                .textFieldStyle(.roundedBorder)
+                .font(.caption)
+                .focused($isFocused)
+                .onChange(of: isFocused) { _, focused in
+                    showSuggestions = focused && !rankedNames.isEmpty
+                }
+                .onChange(of: name) { _, _ in
+                    showSuggestions = isFocused && !filteredSuggestions.isEmpty
+                }
+                .onAppear {
+                    rankedNames = profiles
+                        .map { (name: $0.name, sim: SpeakerMatcher.cosineSimilarity(embedding, $0.embedding)) }
+                        .sorted { $0.sim > $1.sim }
+                        .map(\.name)
+                }
+
+            if showSuggestions && !filteredSuggestions.isEmpty {
+                VStack(alignment: .leading, spacing: 0) {
+                    ForEach(filteredSuggestions.prefix(5), id: \.self) { suggestion in
+                        Button(action: {
+                            name = suggestion
+                            showSuggestions = false
+                        }) {
+                            Text(suggestion)
+                                .font(.caption)
+                                .frame(maxWidth: .infinity, alignment: .leading)
+                                .padding(.horizontal, 6)
+                                .padding(.vertical, 3)
+                                .contentShape(Rectangle())
+                        }
+                        .buttonStyle(.plain)
+                    }
+                }
+                .background(.background)
+                .overlay(
+                    RoundedRectangle(cornerRadius: 4)
+                        .stroke(.separator, lineWidth: 0.5)
+                )
+                .cornerRadius(4)
+                .shadow(color: .black.opacity(0.1), radius: 2, y: 1)
+            }
+        }
+    }
+
+    private var filteredSuggestions: [String] {
+        guard !name.isEmpty else { return rankedNames }
+        return rankedNames.filter { $0.localizedCaseInsensitiveContains(name) }
     }
 }
 

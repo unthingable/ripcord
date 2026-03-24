@@ -46,6 +46,9 @@ final class TranscriptionService: @unchecked Sendable {
     /// Segment timings loaded from sidecar files (for audio preview after restart).
     private var loadedSegments: [URL: [SegmentTiming]] = [:]
 
+    /// Tracks which segment indices have been played per (file, speaker) to cycle through variety.
+    private var playedSegmentIndices: [URL: [String: Set<Int>]] = [:]
+
     var modelsReady: Bool { state == .ready }
     var modelsLoaded: Bool { state == .ready || state == .transcribing }
     var isTranscribing: Bool { state == .transcribing }
@@ -295,23 +298,40 @@ final class TranscriptionService: @unchecked Sendable {
     /// Returns a segment time range for a given raw speaker ID, for audio preview.
     /// Picks randomly from the top 3 longest segments, offset to avoid boundary bleed.
     func randomSegmentRange(for speakerID: String, fileURL: URL) -> (start: Double, end: Double)? {
-        // Use in-memory results if available, otherwise fall back to loaded sidecar data
+        // Use in-memory results if available, otherwise fall back to loaded sidecar data.
+        // When in-memory results exist, filter out sparse-text segments (likely silence).
         let allSegments: [(start: Double, end: Double)]
         if let saved = lastResults[fileURL] {
             allSegments = saved.result.segments
                 .filter { $0.speaker == speakerID }
+                .filter { seg in
+                    let duration = seg.end - seg.start
+                    guard duration >= 2.0 else { return false }
+                    let wordCount = seg.text.split(separator: " ").count
+                    return wordCount >= 3
+                }
                 .map { ($0.start, $0.end) }
         } else if let loaded = loadedSegments[fileURL] {
             allSegments = loaded
                 .filter { $0.speaker == speakerID }
+                .filter { ($0.end - $0.start) >= 2.0 }
                 .map { ($0.start, $0.end) }
         } else {
             return nil
         }
-        let segments = allSegments
-            .sorted { ($0.end - $0.start) > ($1.end - $1.start) }
-        let candidates = Array(segments.prefix(3))
-        guard let seg = candidates.randomElement() else { return nil }
+
+        guard !allSegments.isEmpty else { return nil }
+
+        // Cycle through segments — avoid repeating until all have been played
+        var played = playedSegmentIndices[fileURL]?[speakerID] ?? []
+        if played.count >= allSegments.count {
+            played = []
+        }
+        let unplayed = allSegments.indices.filter { !played.contains($0) }
+        guard let idx = unplayed.randomElement() else { return nil }
+        playedSegmentIndices[fileURL, default: [:]][speakerID, default: []].insert(idx)
+
+        let seg = allSegments[idx]
         let segDuration = seg.end - seg.start
         // Skip into the segment to avoid previous speaker's tail
         let skipAmount = min(1.0, segDuration * 0.2)
