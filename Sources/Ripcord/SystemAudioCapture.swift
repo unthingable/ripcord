@@ -66,7 +66,7 @@ final class SystemAudioCapture: @unchecked Sendable {
             kAudioAggregateDeviceUIDKey: aggregateUID,
             kAudioAggregateDeviceIsPrivateKey: true,
             kAudioAggregateDeviceIsStackedKey: false,
-            kAudioAggregateDeviceTapAutoStartKey: true,
+            kAudioAggregateDeviceTapAutoStartKey: false,
             kAudioAggregateDeviceTapListKey: [
                 [
                     kAudioSubTapUIDKey: tapUID
