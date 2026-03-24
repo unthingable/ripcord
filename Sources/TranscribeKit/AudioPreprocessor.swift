@@ -17,15 +17,86 @@ public enum AudioPreprocessor {
     }
 
     /// Extract audio track from a video/media file to a temporary PCM WAV.
-    /// Uses AVAssetReader to decode to LPCM, avoiding AAC codec issues with AVAudioFile.
+    /// Prefers ffmpeg when available (handles problematic containers more robustly),
+    /// falls back to AVAssetReader in time-ranged chunks.
     public static func extractAudio(from url: URL) async throws -> (url: URL, cleanup: () -> Void) {
+        let tempURL = FileManager.default.temporaryDirectory
+            .appendingPathComponent("transcribekit-extract-\(UUID().uuidString).wav")
+        let cleanup: () -> Void = { try? FileManager.default.removeItem(at: tempURL) }
+
+        // Prefer ffmpeg — AVAssetReader can silently fail mid-file on long/complex containers
+        if await extractWithFFmpeg(from: url, to: tempURL) {
+            return (tempURL, cleanup: cleanup)
+        }
+
+        // Fall back to AVAssetReader in time-ranged chunks
+        try await extractWithAssetReader(from: url, to: tempURL)
+        return (tempURL, cleanup: cleanup)
+    }
+
+    // MARK: - ffmpeg extraction
+
+    private static func extractWithFFmpeg(from url: URL, to outputURL: URL) async -> Bool {
+        let searchPaths = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
+        guard let path = searchPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
+            return false
+        }
+
+        let process = Process()
+        process.executableURL = URL(fileURLWithPath: path)
+        process.arguments = [
+            "-i", url.path,
+            "-vn",                // discard video
+            "-ac", "1",           // mono
+            "-ar", "16000",       // 16 kHz
+            "-c:a", "pcm_f32le", // float32 PCM to match AVAssetReader output
+            "-f", "wav",
+            "-y",                 // overwrite
+            outputURL.path,
+        ]
+        process.standardOutput = FileHandle.nullDevice
+        process.standardError = FileHandle.nullDevice
+
+        let ok: Bool = await withCheckedContinuation { continuation in
+            process.terminationHandler = { p in
+                continuation.resume(returning: p.terminationStatus == 0)
+            }
+            do {
+                try process.run()
+            } catch {
+                continuation.resume(returning: false)
+            }
+        }
+
+        guard ok else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return false
+        }
+
+        // Sanity-check: output must exist and have meaningful size (WAV header = 44 bytes)
+        guard let attrs = try? FileManager.default.attributesOfItem(atPath: outputURL.path),
+              let size = attrs[.size] as? UInt64, size > 1000 else {
+            try? FileManager.default.removeItem(at: outputURL)
+            return false
+        }
+
+        return true
+    }
+
+    // MARK: - AVAssetReader extraction (fallback)
+
+    private static func extractWithAssetReader(from url: URL, to outputURL: URL) async throws {
         let asset = AVAsset(url: url)
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         guard let audioTrack = audioTracks.first else {
             throw AudioPreprocessorError.noAudioTrack
         }
 
-        let reader = try AVAssetReader(asset: asset)
+        let totalDuration = try await CMTimeGetSeconds(asset.load(.duration))
+        guard totalDuration > 0 else {
+            throw AudioPreprocessorError.exportFailed("File has zero duration")
+        }
+
         let outputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVLinearPCMBitDepthKey: 32,
@@ -34,49 +105,69 @@ public enum AudioPreprocessor {
             AVSampleRateKey: 16000,
             AVNumberOfChannelsKey: 1,
         ]
-        let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
-        reader.add(output)
-        guard reader.startReading() else {
-            throw AudioPreprocessorError.exportFailed(reader.error?.localizedDescription)
-        }
 
-        // Read all sample buffers into a contiguous array
-        var samples = [Float]()
-        while let buffer = output.copyNextSampleBuffer(),
-              let blockBuffer = CMSampleBufferGetDataBuffer(buffer) {
-            var length = 0
-            var dataPointer: UnsafeMutablePointer<Int8>?
-            CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
-                                        totalLengthOut: &length, dataPointerOut: &dataPointer)
-            if let dataPointer, length > 0 {
-                let floatCount = length / MemoryLayout<Float>.size
-                dataPointer.withMemoryRebound(to: Float.self, capacity: floatCount) { floats in
-                    samples.append(contentsOf: UnsafeBufferPointer(start: floats, count: floatCount))
-                }
-            }
-        }
-
-        // Accept data even if reader ended with an error (e.g. trailing decode issue)
-        guard !samples.isEmpty else {
-            throw AudioPreprocessorError.exportFailed(reader.error?.localizedDescription)
-        }
-
-        // Write to WAV via AVAudioFile
         let wavFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000,
                                       channels: 1, interleaved: false)!
-        let buffer = AVAudioPCMBuffer(pcmFormat: wavFormat,
-                                      frameCapacity: AVAudioFrameCount(samples.count))!
-        buffer.frameLength = AVAudioFrameCount(samples.count)
-        samples.withUnsafeBufferPointer { src in
-            buffer.floatChannelData![0].update(from: src.baseAddress!, count: samples.count)
+        let wavFile = try AVAudioFile(forWriting: outputURL, settings: wavFormat.settings)
+
+        // Process in time-ranged chunks — a fresh AVAssetReader per chunk avoids
+        // internal resource limits that cause silent mid-file failures.
+        let chunkSeconds: Double = 300
+        var offset: Double = 0
+        var totalFrames: UInt64 = 0
+
+        while offset < totalDuration {
+            let duration = min(chunkSeconds, totalDuration - offset)
+            let timeRange = CMTimeRange(
+                start: CMTime(seconds: offset, preferredTimescale: 600),
+                duration: CMTime(seconds: duration, preferredTimescale: 600))
+
+            let reader = try AVAssetReader(asset: asset)
+            reader.timeRange = timeRange
+            let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
+            reader.add(output)
+            guard reader.startReading() else {
+                if totalFrames > 0 { break }
+                throw AudioPreprocessorError.exportFailed(reader.error?.localizedDescription)
+            }
+
+            var chunkFrames: UInt64 = 0
+            while let sampleBuffer = output.copyNextSampleBuffer(),
+                  let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
+                var length = 0
+                var dataPointer: UnsafeMutablePointer<Int8>?
+                CMBlockBufferGetDataPointer(blockBuffer, atOffset: 0, lengthAtOffsetOut: nil,
+                                            totalLengthOut: &length, dataPointerOut: &dataPointer)
+                if let dataPointer, length > 0 {
+                    let floatCount = length / MemoryLayout<Float>.size
+                    let pcmBuffer = AVAudioPCMBuffer(pcmFormat: wavFormat,
+                                                      frameCapacity: AVAudioFrameCount(floatCount))!
+                    pcmBuffer.frameLength = AVAudioFrameCount(floatCount)
+                    dataPointer.withMemoryRebound(to: Float.self, capacity: floatCount) { floats in
+                        pcmBuffer.floatChannelData![0].update(from: floats, count: floatCount)
+                    }
+                    try wavFile.write(from: pcmBuffer)
+                    chunkFrames += UInt64(floatCount)
+                }
+            }
+
+            if reader.status == .failed && chunkFrames == 0 {
+                break
+            }
+
+            totalFrames += chunkFrames
+            offset += duration
         }
 
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("transcribekit-extract-\(UUID().uuidString).wav")
-        let wavFile = try AVAudioFile(forWriting: tempURL, settings: wavFormat.settings)
-        try wavFile.write(from: buffer)
+        guard totalFrames > 0 else {
+            throw AudioPreprocessorError.exportFailed("No audio samples could be decoded")
+        }
 
-        return (tempURL, cleanup: { try? FileManager.default.removeItem(at: tempURL) })
+        let actualDuration = Double(totalFrames) / 16000.0
+        if actualDuration / totalDuration < 0.9 {
+            throw AudioPreprocessorError.exportFailed(
+                "Extracted \(Int(actualDuration))s of \(Int(totalDuration))s")
+        }
     }
 
     /// Mix to mono (if needed), normalize, and optionally trim to a time range.
