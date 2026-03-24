@@ -52,10 +52,14 @@ struct ContentView: View {
             HStack {
                 if manager.transcriptionService.modelsLoaded {
                     Button("Transcribe File\u{2026}") {
+                        NSApp.activate(ignoringOtherApps: true)
                         let panel = NSOpenPanel()
-                        panel.allowedContentTypes = [.wav, .audio]
+                        panel.allowedContentTypes = [.wav, .audio, .movie, .video, .mpeg4Movie, .quickTimeMovie, .avi]
                         panel.allowsMultipleSelection = false
-                        if panel.runModal() == .OK, let url = panel.url {
+                        panel.begin { response in
+                            guard response == .OK, let url = panel.url else { return }
+                            pinMenuBarWindow(true)
+                            menuBarWindow?.makeKeyAndOrderFront(nil)
                             fileTranscribeURL = url
                             pendingTranscriptionConfig = manager.transcriptionConfig
                             showFileTranscribePopover = true
@@ -74,6 +78,9 @@ struct ContentView: View {
                             showFileTranscribePopover = false
                             fileTranscribeURL = nil
                         }
+                    }
+                    .onChange(of: showFileTranscribePopover) { _, showing in
+                        if !showing { pinMenuBarWindow(false) }
                     }
                 } else if case .loadingModels = manager.transcriptionService.state {
                     HStack(spacing: 4) {
@@ -100,6 +107,13 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("q")
             }
+
+            if let error = manager.transcriptionService.lastTranscriptionError {
+                Text(error)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .lineLimit(2)
+            }
         }
         .padding(8)
         .frame(width: 320)
@@ -107,6 +121,18 @@ struct ContentView: View {
         .onAppear {
             setupGlobalHotkey()
         }
+    }
+
+    private var menuBarWindow: NSWindow? {
+        NSApp.windows.first {
+            String(describing: type(of: $0)).contains("MenuBarExtraWindow")
+        }
+    }
+
+    /// Pin/unpin the MenuBarExtra window so it doesn't dismiss on focus loss.
+    private func pinMenuBarWindow(_ pin: Bool) {
+        guard let w = menuBarWindow else { return }
+        w.hidesOnDeactivate = !pin
     }
 
     // MARK: - Status

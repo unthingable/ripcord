@@ -63,11 +63,11 @@ public final class Transcriber: @unchecked Sendable {
         }
 
         // Pre-process audio (mono mix, normalization, optional trim)
-        let (processURL, cleanup) = try AudioPreprocessor.prepareAudio(
+        let (processURL, cleanup) = try await AudioPreprocessor.prepareAudio(
             from: fileURL, startTime: startTime, endTime: endTime)
         defer { cleanup() }
 
-        let audioDuration = AudioPreprocessor.getAudioDuration(processURL)
+        let audioDuration = await AudioPreprocessor.getAudioDuration(processURL)
         try Task.checkCancellation()
 
         // ASR

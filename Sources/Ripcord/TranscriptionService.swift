@@ -49,6 +49,8 @@ final class TranscriptionService: @unchecked Sendable {
     var modelsReady: Bool { state == .ready }
     var modelsLoaded: Bool { state == .ready || state == .transcribing }
     var isTranscribing: Bool { state == .transcribing }
+    /// Most recent transcription error, cleared on next transcription attempt.
+    var lastTranscriptionError: String?
 
     var speakerProfileStore: SpeakerProfileStore?
 
@@ -93,7 +95,18 @@ final class TranscriptionService: @unchecked Sendable {
     func startTranscription(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) {
         transcriptionTask?.cancel()
         transcriptionTask = Task {
-            _ = try? await self.transcribe(fileURL: fileURL, config: config, overwrite: overwrite)
+            await MainActor.run { lastTranscriptionError = nil }
+            do {
+                _ = try await self.transcribe(fileURL: fileURL, config: config, overwrite: overwrite)
+            } catch is CancellationError {
+                // Cancelled — no error to show
+            } catch {
+                await MainActor.run {
+                    lastTranscriptionError = error.localizedDescription
+                    state = .ready
+                    transcribingURL = nil
+                }
+            }
             self.transcriptionTask = nil
         }
     }

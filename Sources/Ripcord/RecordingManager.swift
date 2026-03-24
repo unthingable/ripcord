@@ -426,10 +426,17 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     private static func audioDuration(url: URL) -> Double? {
-        guard let audioFile = try? AVAudioFile(forReading: url) else { return nil }
-        let sampleRate = audioFile.processingFormat.sampleRate
-        guard sampleRate > 0 else { return nil }
-        return Double(audioFile.length) / sampleRate
+        if let audioFile = try? AVAudioFile(forReading: url) {
+            let sampleRate = audioFile.processingFormat.sampleRate
+            guard sampleRate > 0 else { return nil }
+            return Double(audioFile.length) / sampleRate
+        }
+        // Fall back to AVAsset for video/media containers
+        let asset = AVURLAsset(url: url)
+        let d = asset.duration  // sync property deprecated but async load() unusable from sync context
+        guard d.timescale > 0 else { return nil }
+        let s = CMTimeGetSeconds(d)
+        return s.isFinite ? s : nil
     }
 
     func startRecording() {

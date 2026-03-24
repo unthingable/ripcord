@@ -14,9 +14,9 @@ func log(_ message: String) {
 struct TranscribeCLI: AsyncParsableCommand {
     static let configuration = CommandConfiguration(
         commandName: "transcribe",
-        abstract: "Transcribe audio with speaker diarization using FluidAudio")
+        abstract: "Transcribe audio or video with speaker diarization using FluidAudio")
 
-    @Argument(help: "Path to audio file")
+    @Argument(help: "Path to audio or video file")
     var audioFile: String
 
     @Option(name: .long, help: "ASR model version (default: v3)")
