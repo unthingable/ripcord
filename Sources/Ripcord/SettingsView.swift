@@ -106,6 +106,31 @@ struct SettingsView: View {
                     transcriptionSection
                 }
 
+                Section("Live Transcript") {
+                    Toggle("Enable", isOn: Binding(
+                        get: { manager.liveTranscriptEnabled },
+                        set: { enabled in
+                            Task { await manager.setLiveTranscriptEnabled(enabled) }
+                        }
+                    ))
+                    .disabled(!manager.transcriptionService.modelsReady)
+
+                    LabeledContent("Socket") {
+                        Text("/tmp/ripcord-transcript.sock")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                            .textSelection(.enabled)
+                    }
+                    .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
+
+                    LabeledContent("Clients") {
+                        Text("\(manager.liveTranscriptClientCount)")
+                            .font(.caption)
+                            .foregroundStyle(.secondary)
+                    }
+                    .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
+                }
+
                 Section("General") {
                     LabeledContent("File Prefix") {
                         VStack(alignment: .trailing, spacing: 2) {

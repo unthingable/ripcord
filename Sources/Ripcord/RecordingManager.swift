@@ -47,6 +47,10 @@ enum SettingsKey {
     static let minGapDuration = "ripcord.minGapDuration"
     static let filePrefix = "ripcord.filePrefix"
     static let recordingNameHistory = "ripcord.recordingNameHistory"
+    static let liveTranscriptEnabled = "ripcord.liveTranscriptEnabled"
+    static let liveTranscriptChunkSize = "ripcord.liveTranscriptChunkSize"
+    static let liveTranscriptRightContext = "ripcord.liveTranscriptRightContext"
+    static let liveTranscriptConfirmation = "ripcord.liveTranscriptConfirmation"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -104,6 +108,11 @@ final class RecordingManager: @unchecked Sendable {
     var filePrefix: String = "ripcord"
     var recordingName: String = ""
     var nameHistory: [String] = []
+    var liveTranscriptEnabled: Bool = false
+    var liveTranscriptClientCount: Int = 0
+    var liveTranscriptChunkSize: Double = 2.0
+    var liveTranscriptRightContext: Double = 0.5
+    var liveTranscriptConfirmation: Double = 0.65
 
     let transcriptionService = TranscriptionService()
     private(set) var speakerProfileStore: SpeakerProfileStore
@@ -121,6 +130,11 @@ final class RecordingManager: @unchecked Sendable {
     private var pendingSystemSamples: [Float] = []
     private var pendingMicSamples: [Float] = []
     private let pendingLock = NSLock()
+
+    // Live transcript streaming
+    private(set) var liveTranscriptStream: LiveTranscriptStream?
+    private var transcriptSocketServer: TranscriptSocketServer?
+    private let liveTranscriptLock = NSLock()
 
     // Dedicated write queue for off-thread file I/O
     private let writeQueue = DispatchQueue(label: "com.vibe.ripcord.writequeue")
@@ -274,6 +288,15 @@ final class RecordingManager: @unchecked Sendable {
             filePrefix = savedPrefix
         }
         nameHistory = (defaults.stringArray(forKey: SettingsKey.recordingNameHistory) ?? [])
+
+        // Live transcript
+        liveTranscriptEnabled = defaults.bool(forKey: SettingsKey.liveTranscriptEnabled)
+        let savedChunk = defaults.double(forKey: SettingsKey.liveTranscriptChunkSize)
+        liveTranscriptChunkSize = savedChunk > 0 ? savedChunk : 2.0
+        let savedRC = defaults.double(forKey: SettingsKey.liveTranscriptRightContext)
+        liveTranscriptRightContext = savedRC > 0 ? savedRC : 0.5
+        let savedConf = defaults.double(forKey: SettingsKey.liveTranscriptConfirmation)
+        liveTranscriptConfirmation = savedConf > 0 ? savedConf : 0.65
     }
 
     deinit {
@@ -367,7 +390,16 @@ final class RecordingManager: @unchecked Sendable {
 
         if !transcriptionService.modelsReady
             && TranscriptionService.modelsExistOnDisk(config: transcriptionConfig) {
-            Task { await transcriptionService.prepareModels(config: transcriptionConfig, fromCache: true) }
+            Task {
+                await transcriptionService.prepareModels(config: transcriptionConfig, fromCache: true)
+                // Auto-start live transcript if enabled and models are now ready
+                if await MainActor.run(body: { self.liveTranscriptEnabled })
+                    && transcriptionService.modelsReady {
+                    await startLiveTranscript()
+                }
+            }
+        } else if transcriptionService.modelsReady && liveTranscriptEnabled {
+            Task { await startLiveTranscript() }
         }
     }
 
@@ -877,6 +909,16 @@ final class RecordingManager: @unchecked Sendable {
         UserDefaults.standard.set(prefix, forKey: SettingsKey.filePrefix)
     }
 
+    func setLiveTranscriptEnabled(_ enabled: Bool) async {
+        liveTranscriptEnabled = enabled
+        UserDefaults.standard.set(enabled, forKey: SettingsKey.liveTranscriptEnabled)
+        if enabled {
+            await startLiveTranscript()
+        } else {
+            await stopLiveTranscript()
+        }
+    }
+
     func renameRecording(_ recording: RecordingInfo, to newName: String) {
         let sanitized = Self.sanitizeRecordingName(newName)
         let oldURL = recording.url
@@ -1039,6 +1081,84 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
+    // MARK: - Live Transcript
+
+    func startLiveTranscript() async {
+        guard liveTranscriptEnabled else { return }
+
+        let server = TranscriptSocketServer()
+        do {
+            try server.start()
+        } catch {
+            state = .error("Transcript socket: \(error.localizedDescription)")
+            return
+        }
+        transcriptSocketServer = server
+
+        let stream = LiveTranscriptStream(socketServer: server)
+        do {
+            try await stream.start(
+                chunkSeconds: liveTranscriptChunkSize,
+                rightContextSeconds: liveTranscriptRightContext,
+                confirmationThreshold: liveTranscriptConfirmation
+            )
+        } catch {
+            state = .error("Live transcript: \(error.localizedDescription)")
+            server.stop()
+            transcriptSocketServer = nil
+            return
+        }
+
+        liveTranscriptLock.withLock { liveTranscriptStream = stream }
+        liveTranscriptClientCount = server.connectedClientCount
+    }
+
+    func stopLiveTranscript() async {
+        let stream = liveTranscriptLock.withLock { () -> LiveTranscriptStream? in
+            let s = liveTranscriptStream
+            liveTranscriptStream = nil
+            return s
+        }
+        await stream?.stop()
+
+        transcriptSocketServer?.stop()
+        transcriptSocketServer = nil
+        liveTranscriptClientCount = 0
+    }
+
+    func restartLiveTranscriptIfRunning() async {
+        if liveTranscriptEnabled && liveTranscriptStream != nil {
+            await stopLiveTranscript()
+            await startLiveTranscript()
+        }
+    }
+
+    func setLiveTranscriptChunkSize(_ size: Double) async {
+        liveTranscriptChunkSize = size
+        UserDefaults.standard.set(size, forKey: SettingsKey.liveTranscriptChunkSize)
+        await restartLiveTranscriptIfRunning()
+    }
+
+    func setLiveTranscriptRightContext(_ value: Double) async {
+        liveTranscriptRightContext = value
+        UserDefaults.standard.set(value, forKey: SettingsKey.liveTranscriptRightContext)
+        await restartLiveTranscriptIfRunning()
+    }
+
+    func setLiveTranscriptConfirmation(_ value: Double) async {
+        liveTranscriptConfirmation = value
+        UserDefaults.standard.set(value, forKey: SettingsKey.liveTranscriptConfirmation)
+        await restartLiveTranscriptIfRunning()
+    }
+
+    func toggleLiveTranscript() async {
+        if liveTranscriptEnabled {
+            await startLiveTranscript()
+        } else {
+            await stopLiveTranscript()
+        }
+    }
+
     // MARK: - Private
 
     // Audio always flows to circular buffers (continuous waveform); also to pending when recording.
@@ -1046,11 +1166,13 @@ final class RecordingManager: @unchecked Sendable {
     private func handleSystemSamples(_ samples: [Float]) {
         routeSamples(samples, peakAccum: &systemPeakAccum,
                      pendingArray: &pendingSystemSamples, buffer: systemBuffer)
+        liveTranscriptLock.withLock { liveTranscriptStream }?.feedSystemAudio(samples)
     }
 
     private func handleMicSamples(_ samples: [Float]) {
         routeSamples(samples, peakAccum: &micPeakAccum,
                      pendingArray: &pendingMicSamples, buffer: micBuffer)
+        liveTranscriptLock.withLock { liveTranscriptStream }?.feedMicAudio(samples)
     }
 
     /// Routes incoming audio to the circular buffer (always) and pending recording array (when active).

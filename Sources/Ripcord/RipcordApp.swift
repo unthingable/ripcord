@@ -25,6 +25,11 @@ struct RipcordApp: App {
         Settings {
             SettingsView(manager: manager)
         }
+
+        Window("Live Transcript", id: "copilot") {
+            CopilotView(manager: manager)
+        }
+        .defaultSize(width: 600, height: 500)
     }
 
     private var menubarIcon: NSImage {
@@ -41,8 +46,10 @@ struct RipcordApp: App {
             name = "exclamationmark.triangle"
             tint = nil
         default:
-            name = "waveform.circle"
-            tint = nil
+            name = manager.liveTranscriptEnabled && manager.liveTranscriptStream != nil
+                ? "waveform.circle.fill" : "waveform.circle"
+            tint = manager.liveTranscriptEnabled && manager.liveTranscriptStream != nil
+                ? .systemPurple : nil
         }
 
         let config = NSImage.SymbolConfiguration(pointSize: 16, weight: .regular)

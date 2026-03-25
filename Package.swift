@@ -32,7 +32,10 @@ let package = Package(
         ),
         .executableTarget(
             name: "Ripcord",
-            dependencies: ["TranscribeKit"],
+            dependencies: [
+                "TranscribeKit",
+                .product(name: "FluidAudio", package: "FluidAudio"),
+            ],
             path: "Sources/Ripcord",
             linkerSettings: [
                 .linkedFramework("CoreAudio"),

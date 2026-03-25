@@ -9,6 +9,7 @@ struct ContentView: View {
     @State private var transcribeTarget: RecordingInfo?
     @State private var pendingTranscriptionConfig = TranscriptionConfig()
     @Environment(\.openSettings) private var openSettings
+    @Environment(\.openWindow) private var openWindow
     @State private var showFileTranscribePopover = false
     @State private var fileTranscribeURL: URL?
     @State private var renamingURL: URL?
@@ -146,6 +147,17 @@ struct ContentView: View {
             Text(statusText)
                 .font(.headline)
             Spacer()
+            if manager.liveTranscriptEnabled && manager.liveTranscriptStream != nil {
+                Button(action: {
+                    NSApp.activate(ignoringOtherApps: true)
+                    openWindow(id: "copilot")
+                }) {
+                    Image(systemName: "text.bubble.fill")
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(.secondary)
+                .accessibilityLabel("Open Live Transcript")
+            }
             Button(action: {
                 NSApp.activate()
                 openSettings()
@@ -557,6 +569,28 @@ struct ContentView: View {
                 .labelsHidden()
             }
             .help("Stereo: mixed together\nSplit: system in left, mic in right")
+
+            VStack(spacing: 2) {
+                let active = manager.liveTranscriptEnabled
+                    && manager.liveTranscriptStream != nil
+                Image(systemName: active ? "text.bubble.fill" : "text.bubble")
+                    .font(.system(size: 9))
+                    .frame(height: 10)
+                    .foregroundStyle(active ? .purple : .secondary)
+                Toggle(isOn: Binding(
+                    get: { manager.liveTranscriptEnabled },
+                    set: { enabled in
+                        Task { await manager.setLiveTranscriptEnabled(enabled) }
+                    }
+                )) {
+                    EmptyView()
+                }
+                .toggleStyle(.switch)
+                .controlSize(.mini)
+                .labelsHidden()
+                .disabled(!manager.transcriptionService.modelsReady)
+            }
+            .help("Live Transcript")
         }
     }
 
