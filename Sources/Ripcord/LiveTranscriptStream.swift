@@ -38,6 +38,9 @@ final class LiveTranscriptStream: @unchecked Sendable {
     // Deduplication: track last emitted word end time per source
     private var lastEmittedEnd: [String: TimeInterval] = [:]
 
+    // Confirmation tracking: end time of last confirmed update per source
+    private var confirmedEnd: [String: TimeInterval] = [:]
+
     // Timestamp alignment — shared epoch for both streams
     private let startDate = Date()
     private var systemFirstSampleDate: Date?
@@ -65,15 +68,17 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     func start(
         chunkSeconds: Double = 3.0,
-        rightContextSeconds: Double = 1.0
+        rightContextSeconds: Double = 1.0,
+        minContextForConfirmation: Double = 5.0,
+        confirmationThreshold: Double = 0.65
     ) async throws {
         let config = StreamingAsrConfig(
             chunkSeconds: chunkSeconds,
             hypothesisChunkSeconds: max(0.5, chunkSeconds / 2),
             leftContextSeconds: chunkSeconds,
             rightContextSeconds: rightContextSeconds,
-            minContextForConfirmation: chunkSeconds * 2,
-            confirmationThreshold: 0.65
+            minContextForConfirmation: minContextForConfirmation,
+            confirmationThreshold: confirmationThreshold
         )
 
         // Create managers
@@ -115,7 +120,9 @@ final class LiveTranscriptStream: @unchecked Sendable {
     /// Pending audio buffers and flush timer stay alive — no gap in coverage.
     func reconfigure(
         chunkSeconds: Double,
-        rightContextSeconds: Double
+        rightContextSeconds: Double,
+        minContextForConfirmation: Double = 5.0,
+        confirmationThreshold: Double = 0.65
     ) async throws {
         // Stop old managers and consumer tasks
         systemConsumerTask?.cancel()
@@ -129,8 +136,8 @@ final class LiveTranscriptStream: @unchecked Sendable {
             hypothesisChunkSeconds: max(0.5, chunkSeconds / 2),
             leftContextSeconds: chunkSeconds,
             rightContextSeconds: rightContextSeconds,
-            minContextForConfirmation: chunkSeconds * 2,
-            confirmationThreshold: 0.65
+            minContextForConfirmation: minContextForConfirmation,
+            confirmationThreshold: confirmationThreshold
         )
 
         let sysMgr = StreamingAsrManager(config: config)
@@ -150,8 +157,9 @@ final class LiveTranscriptStream: @unchecked Sendable {
             }
         }
 
-        // Reset deduplication and timestamp alignment for new managers
+        // Reset deduplication, confirmation, and timestamp alignment for new managers
         lastEmittedEnd.removeAll()
+        confirmedEnd.removeAll()
         systemFirstSampleDate = nil
         micFirstSampleDate = nil
 
@@ -275,6 +283,19 @@ final class LiveTranscriptStream: @unchecked Sendable {
         let timings = update.tokenTimings
         guard !timings.isEmpty else { return }
 
+        // Update confirmed-through watermark
+        if update.isConfirmed, let lastTiming = timings.last {
+            let newEnd = lastTiming.endTime + timeOffset
+            let prev = confirmedEnd[source] ?? 0
+            if newEnd > prev {
+                confirmedEnd[source] = newEnd
+                // Broadcast confirm event to socket clients
+                socketServer.broadcast(
+                    "{\"type\":\"confirm\",\"src\":\"\(source)\",\"end\":\(String(format: "%.2f", newEnd))}"
+                )
+            }
+        }
+
         var wordStart: TimeInterval = timings[0].startTime
         var wordEnd: TimeInterval = timings[0].endTime
         var wordText = ""
@@ -316,17 +337,21 @@ final class LiveTranscriptStream: @unchecked Sendable {
         }
         lastEmittedEnd[source] = end
 
+        let confEnd = confirmedEnd[source] ?? 0
+
         // Broadcast to socket clients
         let escaped = trimmed
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
         let line = """
             {"t":\(String(format: "%.2f", start)),"end":\(String(format: "%.2f", end)),\
-            "word":"\(escaped)","src":"\(source)"}
+            "word":"\(escaped)","src":"\(source)","conf":\(String(format: "%.2f", confEnd))}
             """
         socketServer.broadcast(line)
 
         // Yield to in-process stream for UI
-        wordContinuation?.yield(TranscriptWord(word: trimmed, start: start, end: end, source: source))
+        wordContinuation?.yield(TranscriptWord(
+            word: trimmed, start: start, end: end, source: source, confirmedThrough: confEnd
+        ))
     }
 }

@@ -9,7 +9,10 @@ struct TranscriptPanel: View {
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 12) {
                     ForEach(state.turns) { turn in
-                        TurnView(turn: turn)
+                        TurnView(
+                            turn: turn,
+                            confirmedEnd: state.confirmedEnd(for: turn.source)
+                        )
                     }
 
                     // Anchor for auto-scroll
@@ -47,6 +50,7 @@ private struct ScrollOffsetKey: PreferenceKey {
 
 private struct TurnView: View {
     let turn: TranscriptTurn
+    let confirmedEnd: TimeInterval
 
     var body: some View {
         VStack(alignment: .leading, spacing: 2) {
@@ -62,11 +66,25 @@ private struct TurnView: View {
                 }
             }
 
-            Text(turn.fullText)
+            styledText
                 .font(.body)
                 .textSelection(.enabled)
                 .lineSpacing(2)
         }
+    }
+
+    /// Build a Text view with confirmed words at full opacity and tentative words dimmed.
+    private var styledText: Text {
+        let allWords = turn.phrases.flatMap(\.words)
+        guard !allWords.isEmpty else { return Text("") }
+        var result = Text("")
+        for (i, word) in allWords.enumerated() {
+            if i > 0 { result = result + Text(" ") }
+            let isConfirmed = word.end <= confirmedEnd
+            result = result + Text(word.word)
+                .foregroundColor(isConfirmed ? nil : .secondary)
+        }
+        return result
     }
 
     private func formatTimestamp(_ t: TimeInterval) -> String {

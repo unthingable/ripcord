@@ -7,6 +7,8 @@ struct TranscriptWord: Sendable {
     let start: TimeInterval
     let end: TimeInterval
     let source: String  // "sys" or "mic"
+    /// Confirmed-through end time at emission. Words with end <= confirmedThrough are confirmed.
+    let confirmedThrough: TimeInterval
 }
 
 /// A phrase — a sequence of words from the same source separated by < pauseThreshold.
@@ -46,9 +48,17 @@ final class TranscriptState {
     /// Whether the user has scrolled up (disables auto-scroll).
     var userScrolledUp = false
 
+    /// Confirmed-through end time per source. Words with end <= this are confirmed.
+    private(set) var confirmedThrough: [String: TimeInterval] = [:]
+
     private static let pauseThreshold: TimeInterval = 0.5
 
     private var consumeTask: Task<Void, Never>?
+
+    /// Returns the confirmed-through end time for a given source.
+    func confirmedEnd(for source: String) -> TimeInterval {
+        confirmedThrough[source] ?? 0
+    }
 
     func startConsuming(_ stream: AsyncStream<TranscriptWord>) {
         consumeTask?.cancel()
@@ -67,9 +77,15 @@ final class TranscriptState {
 
     func clear() {
         turns.removeAll()
+        confirmedThrough.removeAll()
     }
 
     private func addWord(_ word: TranscriptWord) {
+        // Update confirmed-through watermark
+        if word.confirmedThrough > (confirmedThrough[word.source] ?? 0) {
+            confirmedThrough[word.source] = word.confirmedThrough
+        }
+
         // If same source as current turn, check if we need a new phrase (pause gap)
         if var lastTurn = turns.last, lastTurn.source == word.source {
             if var lastPhrase = lastTurn.phrases.last,

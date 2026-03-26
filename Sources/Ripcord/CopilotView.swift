@@ -6,6 +6,8 @@ struct CopilotView: View {
     @State private var transcriptState = TranscriptState()
     @State private var chunkSize: Double = 3.0
     @State private var rightContext: Double = 1.0
+    @State private var minContext: Double = 5.0
+    @State private var confirmThreshold: Double = 0.65
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,6 +37,20 @@ struct CopilotView: View {
                 ) {
                     Task { await manager.setLiveTranscriptRightContext(rightContext) }
                 }
+                configSlider(
+                    label: "Min context",
+                    value: $minContext, range: 2.0...10.0, step: 0.5,
+                    format: "%.1fs"
+                ) {
+                    Task { await manager.setLiveTranscriptMinContext(minContext) }
+                }
+                configSlider(
+                    label: "Confirm",
+                    value: $confirmThreshold, range: 0.3...0.95, step: 0.05,
+                    format: "%.2f"
+                ) {
+                    Task { await manager.setLiveTranscriptConfirmThreshold(confirmThreshold) }
+                }
             }
             .padding(.horizontal)
             .padding(.bottom, 6)
@@ -53,6 +69,8 @@ struct CopilotView: View {
         .onAppear {
             chunkSize = manager.liveTranscriptChunkSize
             rightContext = manager.liveTranscriptRightContext
+            minContext = manager.liveTranscriptMinContext
+            confirmThreshold = manager.liveTranscriptConfirmThreshold
         }
         .task {
             await connectToStream()

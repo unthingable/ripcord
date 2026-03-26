@@ -53,6 +53,8 @@ enum SettingsKey {
     static let liveTranscriptEnabled = "ripcord.liveTranscriptEnabled"
     static let liveTranscriptChunkSize = "ripcord.liveTranscriptChunkSize"
     static let liveTranscriptRightContext = "ripcord.liveTranscriptRightContext"
+    static let liveTranscriptMinContext = "ripcord.liveTranscriptMinContext"
+    static let liveTranscriptConfirmThreshold = "ripcord.liveTranscriptConfirmThreshold"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -114,6 +116,8 @@ final class RecordingManager: @unchecked Sendable {
     var liveTranscriptClientCount: Int = 0
     var liveTranscriptChunkSize: Double = 3.0
     var liveTranscriptRightContext: Double = 1.0
+    var liveTranscriptMinContext: Double = 5.0
+    var liveTranscriptConfirmThreshold: Double = 0.65
 
     let transcriptionService = TranscriptionService()
     private(set) var speakerProfileStore: SpeakerProfileStore
@@ -296,6 +300,10 @@ final class RecordingManager: @unchecked Sendable {
         liveTranscriptChunkSize = savedChunk > 0 ? savedChunk : 3.0
         let savedRC = defaults.double(forKey: SettingsKey.liveTranscriptRightContext)
         liveTranscriptRightContext = savedRC > 0 ? savedRC : 1.0
+        let savedMinCtx = defaults.double(forKey: SettingsKey.liveTranscriptMinContext)
+        liveTranscriptMinContext = savedMinCtx > 0 ? savedMinCtx : 5.0
+        let savedThresh = defaults.double(forKey: SettingsKey.liveTranscriptConfirmThreshold)
+        liveTranscriptConfirmThreshold = savedThresh > 0 ? savedThresh : 0.65
     }
 
     deinit {
@@ -1127,6 +1135,8 @@ final class RecordingManager: @unchecked Sendable {
                 "channelSplit": channelSplit,
                 "chunkSize": liveTranscriptChunkSize,
                 "rightContext": liveTranscriptRightContext,
+                "minContext": liveTranscriptMinContext,
+                "confirmThreshold": liveTranscriptConfirmThreshold,
                 "modelsReady": transcriptionService.modelsReady,
                 "clients": transcriptSocketServer?.connectedClientCount ?? 0,
             ]
@@ -1150,7 +1160,13 @@ final class RecordingManager: @unchecked Sendable {
             if let rc = obj["rightContext"] as? Double {
                 await setLiveTranscriptRightContext(rc)
             }
-            respond("{\"type\":\"response\",\"cmd\":\"configure\",\"ok\":true,\"chunkSize\":\(liveTranscriptChunkSize),\"rightContext\":\(liveTranscriptRightContext)}")
+            if let mc = obj["minContext"] as? Double {
+                await setLiveTranscriptMinContext(mc)
+            }
+            if let ct = obj["confirmThreshold"] as? Double {
+                await setLiveTranscriptConfirmThreshold(ct)
+            }
+            respond("{\"type\":\"response\",\"cmd\":\"configure\",\"ok\":true,\"chunkSize\":\(liveTranscriptChunkSize),\"rightContext\":\(liveTranscriptRightContext),\"minContext\":\(liveTranscriptMinContext),\"confirmThreshold\":\(liveTranscriptConfirmThreshold)}")
 
         case "setMic":
             if let enabled = obj["enabled"] as? Bool {
@@ -1183,7 +1199,9 @@ final class RecordingManager: @unchecked Sendable {
         do {
             try await stream.start(
                 chunkSeconds: liveTranscriptChunkSize,
-                rightContextSeconds: liveTranscriptRightContext
+                rightContextSeconds: liveTranscriptRightContext,
+                minContextForConfirmation: liveTranscriptMinContext,
+                confirmationThreshold: liveTranscriptConfirmThreshold
             )
         } catch {
             state = .error("Live transcript: \(error.localizedDescription)")
@@ -1216,12 +1234,26 @@ final class RecordingManager: @unchecked Sendable {
         await reconfigureLiveTranscript()
     }
 
+    func setLiveTranscriptMinContext(_ value: Double) async {
+        liveTranscriptMinContext = value
+        UserDefaults.standard.set(value, forKey: SettingsKey.liveTranscriptMinContext)
+        await reconfigureLiveTranscript()
+    }
+
+    func setLiveTranscriptConfirmThreshold(_ value: Double) async {
+        liveTranscriptConfirmThreshold = value
+        UserDefaults.standard.set(value, forKey: SettingsKey.liveTranscriptConfirmThreshold)
+        await reconfigureLiveTranscript()
+    }
+
     private func reconfigureLiveTranscript() async {
         guard let stream = liveTranscriptLock.withLock({ liveTranscriptStream }) else { return }
         do {
             try await stream.reconfigure(
                 chunkSeconds: liveTranscriptChunkSize,
-                rightContextSeconds: liveTranscriptRightContext
+                rightContextSeconds: liveTranscriptRightContext,
+                minContextForConfirmation: liveTranscriptMinContext,
+                confirmationThreshold: liveTranscriptConfirmThreshold
             )
         } catch {
             state = .error("Live transcript reconfigure: \(error.localizedDescription)")
