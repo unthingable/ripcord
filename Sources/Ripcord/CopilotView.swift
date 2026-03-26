@@ -4,8 +4,8 @@ import SwiftUI
 struct CopilotView: View {
     var manager: RecordingManager
     @State private var transcriptState = TranscriptState()
-    @State private var chunkSize: Double = 2.0
-    @State private var rightContext: Double = 0.5
+    @State private var chunkSize: Double = 3.0
+    @State private var rightContext: Double = 1.0
 
     var body: some View {
         VStack(spacing: 0) {

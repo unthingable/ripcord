@@ -5,7 +5,8 @@ private let logger = Logger(subsystem: "com.vibe.ripcord", category: "Transcript
 
 /// Broadcasts newline-delimited JSON over a Unix domain socket.
 /// Clients connect and receive a replay of recent lines followed by live updates.
-final class TranscriptSocketServer {
+/// Also accepts incoming JSONL commands from clients and dispatches them via `commandHandler`.
+final class TranscriptSocketServer: @unchecked Sendable {
     private let socketPath: String
     private let queue = DispatchQueue(label: "com.vibe.ripcord.transcriptsocket")
 
@@ -17,11 +18,19 @@ final class TranscriptSocketServer {
     private var clientFDs: [Int32] = []
     private let clientLock = NSLock()
 
+    // Per-client read state (accessed only on queue)
+    private var readSources: [Int32: DispatchSourceRead] = [:]
+    private var readBuffers: [Int32: Data] = [:]
+
     // Ring buffer for replay-on-connect
     private var replayBuffer: [String] = []
     private var replayHead: Int = 0
     private var replayCount: Int = 0
     private let replayCapacity: Int
+
+    /// Handler for incoming commands from clients.
+    /// Called on an internal queue with the raw JSON line and a response closure.
+    var commandHandler: (@Sendable (_ jsonLine: String, _ respond: @Sendable @escaping (String) -> Void) -> Void)?
 
     /// Number of currently connected clients.
     var connectedClientCount: Int {
@@ -113,6 +122,15 @@ final class TranscriptSocketServer {
             clientFDs.removeAll()
         }
 
+        // Clean up read state on queue
+        queue.async { [self] in
+            for (_, source) in self.readSources {
+                source.cancel()
+            }
+            self.readSources.removeAll()
+            self.readBuffers.removeAll()
+        }
+
         if listenFD >= 0 {
             close(listenFD)
             listenFD = -1
@@ -131,6 +149,7 @@ final class TranscriptSocketServer {
     /// Broadcast a JSONL line to all connected clients and append to replay buffer.
     func broadcast(_ line: String) {
         let message = line.hasSuffix("\n") ? line : line + "\n"
+        var deadFDs: [Int32] = []
 
         clientLock.withLock {
             // Append to ring buffer
@@ -143,6 +162,7 @@ final class TranscriptSocketServer {
             for (i, fd) in clientFDs.enumerated() {
                 if !sendToClient(fd, message: message) {
                     close(fd)
+                    deadFDs.append(fd)
                     deadIndices.append(i)
                 }
             }
@@ -152,6 +172,86 @@ final class TranscriptSocketServer {
                 clientFDs.remove(at: i)
             }
         }
+
+        // Cancel read sources for dead clients (must happen on queue)
+        if !deadFDs.isEmpty {
+            let fds = deadFDs
+            queue.async { [weak self] in
+                for fd in fds {
+                    self?.readSources[fd]?.cancel()
+                }
+            }
+        }
+    }
+
+    // MARK: - Client Read Handling
+
+    /// Set up a dispatch read source to receive commands from a client.
+    /// Must be called on `queue`.
+    private func setupReadSource(for fd: Int32) {
+        readBuffers[fd] = Data()
+
+        let source = DispatchSource.makeReadSource(fileDescriptor: fd, queue: queue)
+        source.setEventHandler { [weak self] in
+            self?.handleClientRead(fd)
+        }
+        source.setCancelHandler { [weak self] in
+            self?.readBuffers.removeValue(forKey: fd)
+            self?.readSources.removeValue(forKey: fd)
+        }
+        source.resume()
+        readSources[fd] = source
+    }
+
+    /// Read available data from a client, buffer it, and dispatch complete lines as commands.
+    private func handleClientRead(_ fd: Int32) {
+        var buf = [UInt8](repeating: 0, count: 4096)
+        let n = read(fd, &buf, buf.count)
+
+        if n <= 0 {
+            dropClient(fd)
+            return
+        }
+
+        readBuffers[fd, default: Data()].append(contentsOf: buf[0..<n])
+
+        // Process complete newline-delimited lines
+        while let buffer = readBuffers[fd],
+              let newlineIdx = buffer.firstIndex(of: UInt8(ascii: "\n")) {
+            let lineData = buffer[buffer.startIndex..<newlineIdx]
+            readBuffers[fd] = Data(buffer[buffer.index(after: newlineIdx)...])
+
+            guard let lineStr = String(data: Data(lineData), encoding: .utf8)?
+                .trimmingCharacters(in: .whitespaces),
+                  !lineStr.isEmpty else { continue }
+
+            let handler = commandHandler
+            let targetQueue = queue
+            let respond: @Sendable (String) -> Void = { [weak self] response in
+                let msg = response.hasSuffix("\n") ? response : response + "\n"
+                targetQueue.async { [weak self] in
+                    _ = self?.sendToClient(fd, message: msg)
+                }
+            }
+            handler?(lineStr, respond)
+        }
+    }
+
+    /// Remove a client that disconnected or errored.
+    private func dropClient(_ fd: Int32) {
+        readSources[fd]?.cancel()
+
+        let wasPresent = clientLock.withLock { () -> Bool in
+            if let idx = clientFDs.firstIndex(of: fd) {
+                clientFDs.remove(at: idx)
+                return true
+            }
+            return false
+        }
+        if wasPresent {
+            close(fd)
+        }
+        logger.info("Client disconnected (fd=\(fd))")
     }
 
     // MARK: - Private
@@ -179,6 +279,9 @@ final class TranscriptSocketServer {
                 }
                 clientFDs.append(clientFD)
             }
+
+            // Set up read source for incoming commands
+            setupReadSource(for: clientFD)
 
             logger.info("Client connected (fd=\(clientFD), total=\(self.clientFDs.count))")
         }

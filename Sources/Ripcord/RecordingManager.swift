@@ -2,8 +2,11 @@ import AVFoundation
 import CoreAudio
 import Foundation
 import Observation
+import os.log
 import SwiftUI
 import TranscribeKit
+
+private let logger = Logger(subsystem: "com.vibe.ripcord", category: "RecordingManager")
 
 enum AppState: Equatable {
     case starting
@@ -109,8 +112,8 @@ final class RecordingManager: @unchecked Sendable {
     var nameHistory: [String] = []
     var liveTranscriptEnabled: Bool = false
     var liveTranscriptClientCount: Int = 0
-    var liveTranscriptChunkSize: Double = 2.0
-    var liveTranscriptRightContext: Double = 0.5
+    var liveTranscriptChunkSize: Double = 3.0
+    var liveTranscriptRightContext: Double = 1.0
 
     let transcriptionService = TranscriptionService()
     private(set) var speakerProfileStore: SpeakerProfileStore
@@ -290,9 +293,9 @@ final class RecordingManager: @unchecked Sendable {
         // Live transcript
         liveTranscriptEnabled = defaults.bool(forKey: SettingsKey.liveTranscriptEnabled)
         let savedChunk = defaults.double(forKey: SettingsKey.liveTranscriptChunkSize)
-        liveTranscriptChunkSize = savedChunk > 0 ? savedChunk : 2.0
+        liveTranscriptChunkSize = savedChunk > 0 ? savedChunk : 3.0
         let savedRC = defaults.double(forKey: SettingsKey.liveTranscriptRightContext)
-        liveTranscriptRightContext = savedRC > 0 ? savedRC : 0.5
+        liveTranscriptRightContext = savedRC > 0 ? savedRC : 1.0
     }
 
     deinit {
@@ -383,6 +386,9 @@ final class RecordingManager: @unchecked Sendable {
             transcriptionService.loadPendingSpeakers(in: outputDirectory)
             startDirectoryMonitor()
         }
+
+        // Start the control/transcript socket server (always on for remote control)
+        await startControlSocket()
 
         if !transcriptionService.modelsReady
             && TranscriptionService.modelsExistOnDisk(config: transcriptionConfig) {
@@ -1077,19 +1083,101 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
+    // MARK: - Control Socket
+
+    private func startControlSocket() async {
+        let server = TranscriptSocketServer()
+        server.commandHandler = { [weak self] jsonLine, respond in
+            guard let self else { return }
+            Task { await self.handleRemoteCommand(jsonLine, respond: respond) }
+        }
+        do {
+            try server.start()
+            transcriptSocketServer = server
+        } catch {
+            logger.error("Control socket failed: \(error.localizedDescription)")
+        }
+    }
+
+    private func handleRemoteCommand(
+        _ jsonLine: String, respond: @Sendable @escaping (String) -> Void
+    ) async {
+        guard let data = jsonLine.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any],
+              let cmd = obj["cmd"] as? String else {
+            respond("{\"type\":\"error\",\"message\":\"Invalid command\"}")
+            return
+        }
+
+        switch cmd {
+        case "status":
+            let stateStr: String
+            switch state {
+            case .starting: stateStr = "starting"
+            case .buffering: stateStr = "buffering"
+            case .recording: stateStr = "recording"
+            case .paused: stateStr = "paused"
+            case .error(let msg): stateStr = "error: \(msg)"
+            }
+            let status: [String: Any] = [
+                "type": "response", "cmd": "status",
+                "state": stateStr,
+                "liveTranscript": liveTranscriptEnabled,
+                "mic": micEnabled,
+                "channelSplit": channelSplit,
+                "chunkSize": liveTranscriptChunkSize,
+                "rightContext": liveTranscriptRightContext,
+                "modelsReady": transcriptionService.modelsReady,
+                "clients": transcriptSocketServer?.connectedClientCount ?? 0,
+            ]
+            if let json = try? JSONSerialization.data(withJSONObject: status),
+               let str = String(data: json, encoding: .utf8) {
+                respond(str)
+            }
+
+        case "start":
+            await setLiveTranscriptEnabled(true)
+            respond("{\"type\":\"response\",\"cmd\":\"start\",\"ok\":true}")
+
+        case "stop":
+            await setLiveTranscriptEnabled(false)
+            respond("{\"type\":\"response\",\"cmd\":\"stop\",\"ok\":true}")
+
+        case "configure":
+            if let chunk = obj["chunkSize"] as? Double {
+                await setLiveTranscriptChunkSize(chunk)
+            }
+            if let rc = obj["rightContext"] as? Double {
+                await setLiveTranscriptRightContext(rc)
+            }
+            respond("{\"type\":\"response\",\"cmd\":\"configure\",\"ok\":true,\"chunkSize\":\(liveTranscriptChunkSize),\"rightContext\":\(liveTranscriptRightContext)}")
+
+        case "setMic":
+            if let enabled = obj["enabled"] as? Bool {
+                await setMicEnabled(enabled)
+                respond("{\"type\":\"response\",\"cmd\":\"setMic\",\"ok\":true,\"enabled\":\(enabled)}")
+            } else {
+                respond("{\"type\":\"error\",\"cmd\":\"setMic\",\"message\":\"Missing 'enabled'\"}")
+            }
+
+        case "setChannelSplit":
+            if let enabled = obj["enabled"] as? Bool {
+                updateChannelSplit(enabled)
+                respond("{\"type\":\"response\",\"cmd\":\"setChannelSplit\",\"ok\":true,\"enabled\":\(enabled)}")
+            } else {
+                respond("{\"type\":\"error\",\"cmd\":\"setChannelSplit\",\"message\":\"Missing 'enabled'\"}")
+            }
+
+        default:
+            respond("{\"type\":\"error\",\"message\":\"Unknown command: \(cmd)\"}")
+        }
+    }
+
     // MARK: - Live Transcript
 
     func startLiveTranscript() async {
         guard liveTranscriptEnabled else { return }
-
-        let server = TranscriptSocketServer()
-        do {
-            try server.start()
-        } catch {
-            state = .error("Transcript socket: \(error.localizedDescription)")
-            return
-        }
-        transcriptSocketServer = server
+        guard let server = transcriptSocketServer else { return }
 
         let stream = LiveTranscriptStream(socketServer: server)
         do {
@@ -1099,8 +1187,6 @@ final class RecordingManager: @unchecked Sendable {
             )
         } catch {
             state = .error("Live transcript: \(error.localizedDescription)")
-            server.stop()
-            transcriptSocketServer = nil
             return
         }
 
@@ -1115,9 +1201,6 @@ final class RecordingManager: @unchecked Sendable {
             return s
         }
         await stream?.stop()
-
-        transcriptSocketServer?.stop()
-        transcriptSocketServer = nil
         liveTranscriptClientCount = 0
     }
 

@@ -64,8 +64,8 @@ final class LiveTranscriptStream: @unchecked Sendable {
     // MARK: - Lifecycle
 
     func start(
-        chunkSeconds: Double = 2.0,
-        rightContextSeconds: Double = 0.5
+        chunkSeconds: Double = 3.0,
+        rightContextSeconds: Double = 1.0
     ) async throws {
         let config = StreamingAsrConfig(
             chunkSeconds: chunkSeconds,
@@ -149,6 +149,11 @@ final class LiveTranscriptStream: @unchecked Sendable {
                 self?.handleUpdate(update, source: "mic")
             }
         }
+
+        // Reset deduplication and timestamp alignment for new managers
+        lastEmittedEnd.removeAll()
+        systemFirstSampleDate = nil
+        micFirstSampleDate = nil
 
         try await sysMgr.start(source: .system)
         try await micMgr.start(source: .microphone)
