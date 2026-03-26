@@ -1,11 +1,41 @@
+import AppKit
 import SwiftUI
 import ServiceManagement
 import TranscribeKit
+
+enum AppearanceMode: String, CaseIterable {
+    case system, light, dark
+
+    var label: String {
+        switch self {
+        case .system: "System"
+        case .light: "Light"
+        case .dark: "Dark"
+        }
+    }
+
+    var nsAppearance: NSAppearance? {
+        switch self {
+        case .system: nil
+        case .light: NSAppearance(named: .aqua)
+        case .dark: NSAppearance(named: .darkAqua)
+        }
+    }
+
+    @MainActor
+    static func apply(_ mode: AppearanceMode) {
+        NSApp.appearance = mode.nsAppearance
+    }
+}
 
 struct SettingsView: View {
     @Bindable var manager: RecordingManager
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
+    @State private var appearanceMode: AppearanceMode = {
+        let raw = UserDefaults.standard.string(forKey: SettingsKey.appearanceOverride) ?? "system"
+        return AppearanceMode(rawValue: raw) ?? .system
+    }()
 
     private var isRecording: Bool { manager.state == .recording || manager.state == .paused }
 
@@ -96,37 +126,18 @@ struct SettingsView: View {
                     }
                     .disabled(!manager.silenceAutoPauseEnabled)
                 }
-            }
-            .formStyle(.grouped)
-            .scrollDisabled(true)
-            .fixedSize(horizontal: false, vertical: true)
 
-            Form {
-                Section("Transcription") {
-                    transcriptionSection
-                }
-
-                Section("Live Transcript") {
-                    Toggle("Enable", isOn: Binding(
-                        get: { manager.liveTranscriptEnabled },
-                        set: { enabled in
-                            Task { await manager.setLiveTranscriptEnabled(enabled) }
+                Section("Appearance") {
+                    Picker("Theme", selection: $appearanceMode) {
+                        ForEach(AppearanceMode.allCases, id: \.self) { mode in
+                            Text(mode.label).tag(mode)
                         }
-                    ))
-                    .disabled(!manager.transcriptionService.modelsReady)
-
-                    LabeledContent("Socket") {
-                        Text("/tmp/ripcord-transcript.sock")
-                            .font(.caption)
-                            .textSelection(.enabled)
                     }
-                    .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
-
-                    LabeledContent("Clients") {
-                        Text("\(manager.liveTranscriptClientCount)")
-                            .font(.caption)
+                    .pickerStyle(.segmented)
+                    .onChange(of: appearanceMode) { _, newValue in
+                        UserDefaults.standard.set(newValue.rawValue, forKey: SettingsKey.appearanceOverride)
+                        AppearanceMode.apply(newValue)
                     }
-                    .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
                 }
 
                 Section("General") {
@@ -163,6 +174,38 @@ struct SettingsView: View {
                         .onChange(of: launchAtLogin) { _, newValue in
                             setLaunchAtLogin(newValue)
                         }
+                }
+            }
+            .formStyle(.grouped)
+            .scrollDisabled(true)
+            .fixedSize(horizontal: false, vertical: true)
+
+            Form {
+                Section("Transcription") {
+                    transcriptionSection
+                }
+
+                Section("Live Transcript") {
+                    Toggle("Enable", isOn: Binding(
+                        get: { manager.liveTranscriptEnabled },
+                        set: { enabled in
+                            Task { await manager.setLiveTranscriptEnabled(enabled) }
+                        }
+                    ))
+                    .disabled(!manager.transcriptionService.modelsReady)
+
+                    LabeledContent("Socket") {
+                        Text("/tmp/ripcord-transcript.sock")
+                            .font(.caption)
+                            .textSelection(.enabled)
+                    }
+                    .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
+
+                    LabeledContent("Clients") {
+                        Text("\(manager.liveTranscriptClientCount)")
+                            .font(.caption)
+                    }
+                    .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
                 }
             }
             .formStyle(.grouped)

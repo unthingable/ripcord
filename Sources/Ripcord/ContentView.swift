@@ -1023,22 +1023,27 @@ struct DefaultMarkSlider: View {
     let range: ClosedRange<Double>
     let step: Double
     let defaultValue: Double
+    var onEditingChanged: ((Bool) -> Void)?
 
     var body: some View {
-        Slider(value: $value, in: range, step: step)
-            .overlay {
-                GeometryReader { geo in
-                    let pad: CGFloat = 10
-                    let track = geo.size.width - pad * 2
-                    let frac = (defaultValue - range.lowerBound) / (range.upperBound - range.lowerBound)
-                    let x = pad + frac * track
-                    Rectangle()
-                        .fill(.secondary.opacity(0.45))
-                        .frame(width: 1.5, height: 8)
-                        .position(x: x, y: geo.size.height - 2)
-                        .allowsHitTesting(false)
-                }
+        Slider(value: $value, in: range, step: step) {
+            EmptyView()
+        } onEditingChanged: { editing in
+            onEditingChanged?(editing)
+        }
+        .overlay {
+            GeometryReader { geo in
+                let pad: CGFloat = 10
+                let track = geo.size.width - pad * 2
+                let frac = (defaultValue - range.lowerBound) / (range.upperBound - range.lowerBound)
+                let x = pad + frac * track
+                Rectangle()
+                    .fill(.secondary.opacity(0.45))
+                    .frame(width: 1.5, height: 8)
+                    .position(x: x, y: geo.size.height - 2)
+                    .allowsHitTesting(false)
             }
+        }
     }
 }
 

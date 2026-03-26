@@ -50,6 +50,7 @@ enum SettingsKey {
     static let minGapDuration = "ripcord.minGapDuration"
     static let filePrefix = "ripcord.filePrefix"
     static let recordingNameHistory = "ripcord.recordingNameHistory"
+    static let appearanceOverride = "ripcord.appearanceOverride"
     static let liveTranscriptEnabled = "ripcord.liveTranscriptEnabled"
     static let liveTranscriptChunkSize = "ripcord.liveTranscriptChunkSize"
     static let liveTranscriptRightContext = "ripcord.liveTranscriptRightContext"

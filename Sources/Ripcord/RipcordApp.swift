@@ -7,6 +7,11 @@ struct RipcordApp: App {
     init() {
         let mgr = RecordingManager()
         _manager = State(initialValue: mgr)
+        // Apply saved appearance override after NSApp is available
+        Task { @MainActor in
+            let raw = UserDefaults.standard.string(forKey: SettingsKey.appearanceOverride) ?? "system"
+            AppearanceMode.apply(AppearanceMode(rawValue: raw) ?? .system)
+        }
         Task { await mgr.startBufferingOnce() }
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,

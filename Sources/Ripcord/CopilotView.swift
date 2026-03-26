@@ -8,6 +8,7 @@ struct CopilotView: View {
     @State private var rightContext: Double = 1.0
     @State private var minContext: Double = 5.0
     @State private var confirmThreshold: Double = 0.65
+    @State private var showControls = false
 
     var body: some View {
         VStack(spacing: 0) {
@@ -16,44 +17,45 @@ struct CopilotView: View {
                 Text("Live Transcript")
                     .font(.headline)
                 Spacer()
+                Button {
+                    showControls.toggle()
+                } label: {
+                    Image(systemName: "slider.horizontal.3")
+                        .foregroundStyle(showControls ? .primary : .secondary)
+                }
+                .buttonStyle(.plain)
+                .help("Toggle tuning controls")
                 statusBadge
             }
             .padding(.horizontal)
             .padding(.vertical, 8)
 
-            // Controls
-            VStack(spacing: 4) {
-                configSlider(
-                    label: "Chunk",
-                    value: $chunkSize, range: 1.0...8.0, step: 0.5,
-                    format: "%.1fs"
-                ) {
-                    Task { await manager.setLiveTranscriptChunkSize(chunkSize) }
+            // Controls (collapsible)
+            if showControls {
+                VStack(spacing: 6) {
+                    configRow("Chunk", value: $chunkSize, range: 1.0...8.0, step: 0.5,
+                              defaultValue: 3.0, format: "%.1fs") {
+                        Task { await manager.setLiveTranscriptChunkSize(chunkSize) }
+                    }
+                    configRow("Lookahead", value: $rightContext, range: 0.0...2.0, step: 0.1,
+                              defaultValue: 1.0, format: "%.1fs") {
+                        Task { await manager.setLiveTranscriptRightContext(rightContext) }
+                    }
+                    configRow("Min context", value: $minContext, range: 2.0...10.0, step: 0.5,
+                              defaultValue: 5.0, format: "%.1fs") {
+                        Task { await manager.setLiveTranscriptMinContext(minContext) }
+                    }
+                    configRow("Confirm", value: $confirmThreshold, range: 0.3...0.95, step: 0.05,
+                              defaultValue: 0.65, format: "%.2f") {
+                        Task { await manager.setLiveTranscriptConfirmThreshold(confirmThreshold) }
+                    }
                 }
-                configSlider(
-                    label: "Lookahead",
-                    value: $rightContext, range: 0.0...2.0, step: 0.1,
-                    format: "%.1fs"
-                ) {
-                    Task { await manager.setLiveTranscriptRightContext(rightContext) }
-                }
-                configSlider(
-                    label: "Min context",
-                    value: $minContext, range: 2.0...10.0, step: 0.5,
-                    format: "%.1fs"
-                ) {
-                    Task { await manager.setLiveTranscriptMinContext(minContext) }
-                }
-                configSlider(
-                    label: "Confirm",
-                    value: $confirmThreshold, range: 0.3...0.95, step: 0.05,
-                    format: "%.2f"
-                ) {
-                    Task { await manager.setLiveTranscriptConfirmThreshold(confirmThreshold) }
-                }
+                .controlSize(.small)
+                .padding(8)
+                .background(.quaternary.opacity(0.5), in: RoundedRectangle(cornerRadius: 6))
+                .padding(.horizontal)
+                .padding(.bottom, 6)
             }
-            .padding(.horizontal)
-            .padding(.bottom, 6)
 
             Divider()
 
@@ -80,27 +82,29 @@ struct CopilotView: View {
         }
     }
 
-    private func configSlider(
-        label: String,
+    private func configRow(
+        _ label: String,
         value: Binding<Double>,
         range: ClosedRange<Double>,
         step: Double,
+        defaultValue: Double,
         format: String,
         onCommit: @escaping () -> Void
     ) -> some View {
-        HStack(spacing: 8) {
+        HStack(spacing: 6) {
             Text(label)
                 .font(.caption)
-                .frame(width: 60, alignment: .trailing)
-            Slider(value: value, in: range, step: step) {
-                EmptyView()
-            } onEditingChanged: { editing in
-                if !editing { onCommit() }
-            }
+                .foregroundStyle(.primary)
+                .frame(width: 72, alignment: .trailing)
+            DefaultMarkSlider(
+                value: value, range: range, step: step, defaultValue: defaultValue,
+                onEditingChanged: { editing in if !editing { onCommit() } }
+            )
             Text(String(format: format, value.wrappedValue))
                 .font(.caption)
+                .foregroundStyle(.primary)
                 .monospacedDigit()
-                .frame(width: 36, alignment: .leading)
+                .frame(width: 40, alignment: .leading)
         }
     }
 
