@@ -65,8 +65,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     func start(
         chunkSeconds: Double = 2.0,
-        rightContextSeconds: Double = 0.5,
-        confirmationThreshold: Double = 0.65
+        rightContextSeconds: Double = 0.5
     ) async throws {
         let config = StreamingAsrConfig(
             chunkSeconds: chunkSeconds,
@@ -74,7 +73,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
             leftContextSeconds: chunkSeconds,
             rightContextSeconds: rightContextSeconds,
             minContextForConfirmation: chunkSeconds * 2,
-            confirmationThreshold: confirmationThreshold
+            confirmationThreshold: 0.65
         )
 
         // Create managers
@@ -110,6 +109,51 @@ final class LiveTranscriptStream: @unchecked Sendable {
         flushTimer = timer
 
         logger.info("Live transcript stream started")
+    }
+
+    /// Restart ASR managers with new config without interrupting audio feeding.
+    /// Pending audio buffers and flush timer stay alive — no gap in coverage.
+    func reconfigure(
+        chunkSeconds: Double,
+        rightContextSeconds: Double
+    ) async throws {
+        // Stop old managers and consumer tasks
+        systemConsumerTask?.cancel()
+        micConsumerTask?.cancel()
+        if let sys = systemManager { _ = try? await sys.finish() }
+        if let mic = micManager { _ = try? await mic.finish() }
+
+        // Create new managers with updated config
+        let config = StreamingAsrConfig(
+            chunkSeconds: chunkSeconds,
+            hypothesisChunkSeconds: max(0.5, chunkSeconds / 2),
+            leftContextSeconds: chunkSeconds,
+            rightContextSeconds: rightContextSeconds,
+            minContextForConfirmation: chunkSeconds * 2,
+            confirmationThreshold: 0.65
+        )
+
+        let sysMgr = StreamingAsrManager(config: config)
+        let micMgr = StreamingAsrManager(config: config)
+        systemManager = sysMgr
+        micManager = micMgr
+
+        // Start new consumer tasks
+        systemConsumerTask = Task { [weak self] in
+            for await update in await sysMgr.transcriptionUpdates {
+                self?.handleUpdate(update, source: "sys")
+            }
+        }
+        micConsumerTask = Task { [weak self] in
+            for await update in await micMgr.transcriptionUpdates {
+                self?.handleUpdate(update, source: "mic")
+            }
+        }
+
+        try await sysMgr.start(source: .system)
+        try await micMgr.start(source: .microphone)
+
+        logger.info("Live transcript stream reconfigured: chunk=\(chunkSeconds)s, lookahead=\(rightContextSeconds)s")
     }
 
     func stop() async {

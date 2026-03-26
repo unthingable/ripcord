@@ -6,7 +6,6 @@ struct CopilotView: View {
     @State private var transcriptState = TranscriptState()
     @State private var chunkSize: Double = 2.0
     @State private var rightContext: Double = 0.5
-    @State private var confirmation: Double = 0.65
 
     var body: some View {
         VStack(spacing: 0) {
@@ -27,33 +26,14 @@ struct CopilotView: View {
                     value: $chunkSize, range: 1.0...8.0, step: 0.5,
                     format: "%.1fs"
                 ) {
-                    Task {
-                        transcriptState.clear()
-                        await manager.setLiveTranscriptChunkSize(chunkSize)
-                        await reconnectToStream()
-                    }
+                    Task { await manager.setLiveTranscriptChunkSize(chunkSize) }
                 }
                 configSlider(
                     label: "Lookahead",
                     value: $rightContext, range: 0.0...2.0, step: 0.1,
                     format: "%.1fs"
                 ) {
-                    Task {
-                        transcriptState.clear()
-                        await manager.setLiveTranscriptRightContext(rightContext)
-                        await reconnectToStream()
-                    }
-                }
-                configSlider(
-                    label: "Confirm",
-                    value: $confirmation, range: 0.0...1.0, step: 0.05,
-                    format: "%.2f"
-                ) {
-                    Task {
-                        transcriptState.clear()
-                        await manager.setLiveTranscriptConfirmation(confirmation)
-                        await reconnectToStream()
-                    }
+                    Task { await manager.setLiveTranscriptRightContext(rightContext) }
                 }
             }
             .padding(.horizontal)
@@ -69,11 +49,10 @@ struct CopilotView: View {
             }
         }
         .frame(minWidth: 400, minHeight: 300)
-        .background(Color(nsColor: .windowBackgroundColor))
+        .background(Color(nsColor: .controlBackgroundColor))
         .onAppear {
             chunkSize = manager.liveTranscriptChunkSize
             rightContext = manager.liveTranscriptRightContext
-            confirmation = manager.liveTranscriptConfirmation
         }
         .task {
             await connectToStream()
@@ -146,11 +125,5 @@ struct CopilotView: View {
     private func connectToStream() async {
         guard let stream = manager.liveTranscriptStream?.wordStream else { return }
         transcriptState.startConsuming(stream)
-    }
-
-    private func reconnectToStream() async {
-        transcriptState.stopConsuming()
-        try? await Task.sleep(for: .milliseconds(200))
-        await connectToStream()
     }
 }

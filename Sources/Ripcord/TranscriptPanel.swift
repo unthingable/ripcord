@@ -58,7 +58,7 @@ private struct TurnView: View {
                 if let t = turn.startTime {
                     Text(formatTimestamp(t))
                         .font(.caption2)
-                        .foregroundStyle(.tertiary)
+                        .foregroundStyle(.secondary)
                 }
             }
 

@@ -50,7 +50,6 @@ enum SettingsKey {
     static let liveTranscriptEnabled = "ripcord.liveTranscriptEnabled"
     static let liveTranscriptChunkSize = "ripcord.liveTranscriptChunkSize"
     static let liveTranscriptRightContext = "ripcord.liveTranscriptRightContext"
-    static let liveTranscriptConfirmation = "ripcord.liveTranscriptConfirmation"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -112,7 +111,6 @@ final class RecordingManager: @unchecked Sendable {
     var liveTranscriptClientCount: Int = 0
     var liveTranscriptChunkSize: Double = 2.0
     var liveTranscriptRightContext: Double = 0.5
-    var liveTranscriptConfirmation: Double = 0.65
 
     let transcriptionService = TranscriptionService()
     private(set) var speakerProfileStore: SpeakerProfileStore
@@ -295,8 +293,6 @@ final class RecordingManager: @unchecked Sendable {
         liveTranscriptChunkSize = savedChunk > 0 ? savedChunk : 2.0
         let savedRC = defaults.double(forKey: SettingsKey.liveTranscriptRightContext)
         liveTranscriptRightContext = savedRC > 0 ? savedRC : 0.5
-        let savedConf = defaults.double(forKey: SettingsKey.liveTranscriptConfirmation)
-        liveTranscriptConfirmation = savedConf > 0 ? savedConf : 0.65
     }
 
     deinit {
@@ -1099,8 +1095,7 @@ final class RecordingManager: @unchecked Sendable {
         do {
             try await stream.start(
                 chunkSeconds: liveTranscriptChunkSize,
-                rightContextSeconds: liveTranscriptRightContext,
-                confirmationThreshold: liveTranscriptConfirmation
+                rightContextSeconds: liveTranscriptRightContext
             )
         } catch {
             state = .error("Live transcript: \(error.localizedDescription)")
@@ -1126,30 +1121,31 @@ final class RecordingManager: @unchecked Sendable {
         liveTranscriptClientCount = 0
     }
 
-    func restartLiveTranscriptIfRunning() async {
-        if liveTranscriptEnabled && liveTranscriptStream != nil {
-            await stopLiveTranscript()
-            await startLiveTranscript()
-        }
-    }
-
     func setLiveTranscriptChunkSize(_ size: Double) async {
         liveTranscriptChunkSize = size
         UserDefaults.standard.set(size, forKey: SettingsKey.liveTranscriptChunkSize)
-        await restartLiveTranscriptIfRunning()
+        await reconfigureLiveTranscript()
     }
 
     func setLiveTranscriptRightContext(_ value: Double) async {
         liveTranscriptRightContext = value
         UserDefaults.standard.set(value, forKey: SettingsKey.liveTranscriptRightContext)
-        await restartLiveTranscriptIfRunning()
+        await reconfigureLiveTranscript()
     }
 
-    func setLiveTranscriptConfirmation(_ value: Double) async {
-        liveTranscriptConfirmation = value
-        UserDefaults.standard.set(value, forKey: SettingsKey.liveTranscriptConfirmation)
-        await restartLiveTranscriptIfRunning()
+    private func reconfigureLiveTranscript() async {
+        guard let stream = liveTranscriptLock.withLock({ liveTranscriptStream }) else { return }
+        do {
+            try await stream.reconfigure(
+                chunkSeconds: liveTranscriptChunkSize,
+                rightContextSeconds: liveTranscriptRightContext
+            )
+        } catch {
+            state = .error("Live transcript reconfigure: \(error.localizedDescription)")
+        }
     }
+
+
 
     func toggleLiveTranscript() async {
         if liveTranscriptEnabled {

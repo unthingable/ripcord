@@ -227,11 +227,9 @@ struct ContentView: View {
                 } else {
                     Text("Capture: \(formatTime(manager.captureDurationSeconds))")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
                     Spacer()
                     Text("/ \(formatTime(manager.bufferDurationSeconds))")
                         .font(.caption)
-                        .foregroundStyle(.secondary)
                 }
                 Spacer()
             }
@@ -458,7 +456,6 @@ struct ContentView: View {
         let formatLabel = manager.outputFormat.rawValue
         Text("Buffer: \(bufferLabel) min  \u{2022}  \(formatLabel)")
             .font(.caption)
-            .foregroundStyle(.secondary)
     }
 
     // MARK: - Mic Row (toggle + device picker)
@@ -601,7 +598,6 @@ struct ContentView: View {
         VStack(alignment: .leading, spacing: 4) {
             Text("Recent Recordings")
                 .font(.caption)
-                .foregroundStyle(.secondary)
 
             ScrollView {
                 VStack(alignment: .leading, spacing: 6) {
@@ -868,7 +864,6 @@ private struct SpeakerNamingPopover: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Name New Speakers")
                 .font(.caption)
-                .foregroundStyle(.secondary)
 
             if let speakers = service.unmatchedSpeakers[fileURL] {
                 ForEach(speakers) { speaker in
@@ -884,7 +879,6 @@ private struct SpeakerNamingPopover: View {
 
                         Text(speaker.id)
                             .font(.caption)
-                            .foregroundStyle(.secondary)
                             .frame(width: 80, alignment: .leading)
                         SpeakerNameField(
                             name: Binding(
@@ -1139,7 +1133,6 @@ struct TranscriptionConfigPopover: View {
         VStack(alignment: .leading, spacing: 8) {
             Text("Transcription Settings")
                 .font(.caption)
-                .foregroundStyle(.secondary)
 
             TranscriptionConfigForm(config: $config)
 

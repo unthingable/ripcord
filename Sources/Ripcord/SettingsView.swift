@@ -118,7 +118,6 @@ struct SettingsView: View {
                     LabeledContent("Socket") {
                         Text("/tmp/ripcord-transcript.sock")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
                             .textSelection(.enabled)
                     }
                     .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
@@ -126,7 +125,6 @@ struct SettingsView: View {
                     LabeledContent("Clients") {
                         Text("\(manager.liveTranscriptClientCount)")
                             .font(.caption)
-                            .foregroundStyle(.secondary)
                     }
                     .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
                 }
@@ -186,20 +184,17 @@ struct SettingsView: View {
             }
             Text("Required for transcription")
                 .font(.caption)
-                .foregroundStyle(.secondary)
 
         case .loadingModels:
             ProgressView()
                 .controlSize(.small)
             Text("Loading models\u{2026}")
                 .font(.caption)
-                .foregroundStyle(.secondary)
 
         case .downloadingModels(let progress):
             ProgressView(value: progress)
             Text("Downloading models\u{2026}")
                 .font(.caption)
-                .foregroundStyle(.secondary)
 
         case .failed(let error):
             Text(error)
@@ -217,7 +212,6 @@ struct SettingsView: View {
                     .font(.caption)
                 Text("Models ready")
                     .font(.caption)
-                    .foregroundStyle(.secondary)
             }
 
             Toggle("Transcribe recordings", isOn: Binding(
