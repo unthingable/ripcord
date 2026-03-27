@@ -73,16 +73,23 @@ private struct TurnView: View {
         }
     }
 
-    /// Build a Text view with confirmed words at full opacity and tentative words dimmed.
+    /// Build a Text view with confirmed words at full opacity, tentative words dimmed,
+    /// and hypothesis words further dimmed with italic.
     private var styledText: Text {
         let allWords = turn.phrases.flatMap(\.words)
         guard !allWords.isEmpty else { return Text("") }
         var result = Text("")
         for (i, word) in allWords.enumerated() {
             if i > 0 { result = result + Text(" ") }
-            let isConfirmed = word.end <= confirmedEnd
-            result = result + Text(word.word)
-                .foregroundColor(isConfirmed ? nil : .secondary)
+            if word.isHypothesis {
+                result = result + Text(word.word)
+                    .foregroundColor(.secondary.opacity(0.6))
+                    .italic()
+            } else {
+                let isConfirmed = word.end <= confirmedEnd
+                result = result + Text(word.word)
+                    .foregroundColor(isConfirmed ? nil : .secondary)
+            }
         }
         return result
     }

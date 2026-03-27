@@ -9,6 +9,8 @@ struct TranscriptWord: Sendable {
     let source: String  // "sys" or "mic"
     /// Confirmed-through end time at emission. Words with end <= confirmedThrough are confirmed.
     let confirmedThrough: TimeInterval
+    /// Whether this word came from a mid-chunk hypothesis (will be replaced by full-chunk output).
+    let isHypothesis: Bool
 }
 
 /// A phrase — a sequence of words from the same source separated by < pauseThreshold.
@@ -86,24 +88,75 @@ final class TranscriptState {
             confirmedThrough[word.source] = word.confirmedThrough
         }
 
-        // If same source as current turn, check if we need a new phrase (pause gap)
+        if word.isHypothesis {
+            addHypothesisWord(word)
+        } else {
+            // Full-chunk word: retract any hypothesis words for this source first
+            retractHypothesisWords(source: word.source)
+            appendWord(word)
+        }
+    }
+
+    /// Append a word to the turn/phrase structure (standard path for both full-chunk and hypothesis).
+    private func appendWord(_ word: TranscriptWord) {
         if var lastTurn = turns.last, lastTurn.source == word.source {
             if var lastPhrase = lastTurn.phrases.last,
                let lastEnd = lastPhrase.words.last?.end,
                word.start - lastEnd < Self.pauseThreshold
             {
-                // Append to existing phrase
                 lastPhrase.words.append(word)
                 lastTurn.phrases[lastTurn.phrases.count - 1] = lastPhrase
             } else {
-                // New phrase (pause detected)
                 lastTurn.phrases.append(TranscriptPhrase(words: [word], source: word.source))
             }
             turns[turns.count - 1] = lastTurn
         } else {
-            // New speaker turn
             let phrase = TranscriptPhrase(words: [word], source: word.source)
             turns.append(TranscriptTurn(source: word.source, phrases: [phrase]))
+        }
+    }
+
+    /// Add a hypothesis word, replacing any prior hypothesis words for this source.
+    private func addHypothesisWord(_ word: TranscriptWord) {
+        // On first hypothesis word for a new batch, retract previous hypothesis words
+        // We detect "new batch" by checking if this word's start is before the last hypothesis end
+        // (which means the ASR re-processed the same region with more context)
+        retractHypothesisWords(source: word.source)
+        appendWord(word)
+    }
+
+    /// Remove all hypothesis words for a given source from the tail of the turns array.
+    private func retractHypothesisWords(source: String) {
+        guard !turns.isEmpty else { return }
+
+        // Walk backwards through turns — hypothesis words only exist at the tail for their source
+        var i = turns.count - 1
+        while i >= 0 {
+            guard turns[i].source == source else {
+                // Stop once we pass a turn from a different source — hypothesis words
+                // for this source can't exist before a different speaker's turn
+                break
+            }
+
+            var turn = turns[i]
+            var j = turn.phrases.count - 1
+            while j >= 0 {
+                let original = turn.phrases[j].words
+                let filtered = original.filter { !$0.isHypothesis }
+                if filtered.isEmpty {
+                    turn.phrases.remove(at: j)
+                } else if filtered.count != original.count {
+                    turn.phrases[j].words = filtered
+                }
+                j -= 1
+            }
+
+            if turn.phrases.isEmpty {
+                turns.remove(at: i)
+            } else {
+                turns[i] = turn
+            }
+            i -= 1
         }
     }
 }

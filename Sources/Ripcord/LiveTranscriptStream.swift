@@ -15,8 +15,16 @@ final class LiveTranscriptStream: @unchecked Sendable {
     private let audioFormat: AVAudioFormat
 
     // Streaming ASR managers (actors — must be called from async context)
+    // Protected by managerLock when read from flushQueue.
     private var systemManager: StreamingAsrManager?
     private var micManager: StreamingAsrManager?
+
+    // Pending managers during hot-swap reconfigure (fed in parallel with active managers)
+    private var pendingSystemManager: StreamingAsrManager?
+    private var pendingMicManager: StreamingAsrManager?
+
+    // Protects manager pointer reads/writes between flushQueue and async contexts
+    private let managerLock = NSLock()
 
     // Consumer tasks
     private var systemConsumerTask: Task<Void, Never>?
@@ -35,8 +43,11 @@ final class LiveTranscriptStream: @unchecked Sendable {
     private var wordContinuation: AsyncStream<TranscriptWord>.Continuation?
     private(set) var wordStream: AsyncStream<TranscriptWord>?
 
-    // Deduplication: track last emitted word end time per source
+    // Deduplication: track last emitted word end time per source (full-chunk, monotonic)
     private var lastEmittedEnd: [String: TimeInterval] = [:]
+
+    // Deduplication for hypothesis words (rewindable — reset when full-chunk arrives)
+    private var lastHypothesisEnd: [String: TimeInterval] = [:]
 
     // Confirmation tracking: end time of last confirmed update per source
     private var confirmedEnd: [String: TimeInterval] = [:]
@@ -81,6 +92,13 @@ final class LiveTranscriptStream: @unchecked Sendable {
             confirmationThreshold: confirmationThreshold
         )
 
+        // Reset state from any prior stream
+        lastEmittedEnd.removeAll()
+        lastHypothesisEnd.removeAll()
+        confirmedEnd.removeAll()
+        systemFirstSampleDate = nil
+        micFirstSampleDate = nil
+
         // Create managers
         let sysMgr = StreamingAsrManager(config: config)
         let micMgr = StreamingAsrManager(config: config)
@@ -116,21 +134,14 @@ final class LiveTranscriptStream: @unchecked Sendable {
         logger.info("Live transcript stream started")
     }
 
-    /// Restart ASR managers with new config without interrupting audio feeding.
-    /// Pending audio buffers and flush timer stay alive — no gap in coverage.
+    /// Hot-swap reconfigure: starts new managers in parallel with old ones, feeds audio to both,
+    /// then atomically swaps once new managers are ready. No gap in coverage.
     func reconfigure(
         chunkSeconds: Double,
         rightContextSeconds: Double,
         minContextForConfirmation: Double = 5.0,
         confirmationThreshold: Double = 0.65
     ) async throws {
-        // Stop old managers and consumer tasks
-        systemConsumerTask?.cancel()
-        micConsumerTask?.cancel()
-        if let sys = systemManager { _ = try? await sys.finish() }
-        if let mic = micManager { _ = try? await mic.finish() }
-
-        // Create new managers with updated config
         let config = StreamingAsrConfig(
             chunkSeconds: chunkSeconds,
             hypothesisChunkSeconds: max(0.5, chunkSeconds / 2),
@@ -140,33 +151,64 @@ final class LiveTranscriptStream: @unchecked Sendable {
             confirmationThreshold: confirmationThreshold
         )
 
-        let sysMgr = StreamingAsrManager(config: config)
-        let micMgr = StreamingAsrManager(config: config)
-        systemManager = sysMgr
-        micManager = micMgr
+        // 1. Create pending managers and make them visible to flushPendingSamples
+        let newSysMgr = StreamingAsrManager(config: config)
+        let newMicMgr = StreamingAsrManager(config: config)
+        managerLock.withLock {
+            pendingSystemManager = newSysMgr
+            pendingMicManager = newMicMgr
+        }
 
-        // Start new consumer tasks
-        systemConsumerTask = Task { [weak self] in
-            for await update in await sysMgr.transcriptionUpdates {
+        // 2. Start new managers — old managers continue processing during this await
+        try await newSysMgr.start(source: .system)
+        try await newMicMgr.start(source: .microphone)
+
+        // 3. Capture old managers for cleanup
+        let oldSysMgr = systemManager
+        let oldMicMgr = micManager
+        let oldSysTask = systemConsumerTask
+        let oldMicTask = micConsumerTask
+
+        // 4. Create new consumer tasks
+        let newSysTask = Task { [weak self] in
+            for await update in await newSysMgr.transcriptionUpdates {
                 self?.handleUpdate(update, source: "sys")
             }
         }
-        micConsumerTask = Task { [weak self] in
-            for await update in await micMgr.transcriptionUpdates {
+        let newMicTask = Task { [weak self] in
+            for await update in await newMicMgr.transcriptionUpdates {
                 self?.handleUpdate(update, source: "mic")
             }
         }
 
+        // 5. Atomic swap: promote pending to active, reset state
+        managerLock.withLock {
+            systemManager = newSysMgr
+            micManager = newMicMgr
+            pendingSystemManager = nil
+            pendingMicManager = nil
+        }
+        systemConsumerTask = newSysTask
+        micConsumerTask = newMicTask
+
         // Reset deduplication, confirmation, and timestamp alignment for new managers
         lastEmittedEnd.removeAll()
+        lastHypothesisEnd.removeAll()
         confirmedEnd.removeAll()
         systemFirstSampleDate = nil
         micFirstSampleDate = nil
 
-        try await sysMgr.start(source: .system)
-        try await micMgr.start(source: .microphone)
+        // 6. Drain old managers (fire-and-forget — non-blocking cleanup)
+        oldSysTask?.cancel()
+        oldMicTask?.cancel()
+        if let oldSys = oldSysMgr {
+            Task { _ = try? await oldSys.finish() }
+        }
+        if let oldMic = oldMicMgr {
+            Task { _ = try? await oldMic.finish() }
+        }
 
-        logger.info("Live transcript stream reconfigured: chunk=\(chunkSeconds)s, lookahead=\(rightContextSeconds)s")
+        logger.info("Live transcript stream reconfigured (hot-swap): chunk=\(chunkSeconds)s, lookahead=\(rightContextSeconds)s")
     }
 
     func stop() async {
@@ -188,8 +230,12 @@ final class LiveTranscriptStream: @unchecked Sendable {
         systemConsumerTask = nil
         micConsumerTask = nil
 
-        systemManager = nil
-        micManager = nil
+        managerLock.withLock {
+            systemManager = nil
+            micManager = nil
+            pendingSystemManager = nil
+            pendingMicManager = nil
+        }
 
         // Finish in-process word stream
         wordContinuation?.finish()
@@ -233,20 +279,35 @@ final class LiveTranscriptStream: @unchecked Sendable {
             return (sys, mic)
         }
 
-        // Feed system audio
-        if !sysSamples.isEmpty, let manager = systemManager {
+        // Snapshot manager pointers under lock (hot-swap may be in progress)
+        let (sysMgr, micMgr, pendingSys, pendingMic) = managerLock.withLock {
+            (systemManager, micManager, pendingSystemManager, pendingMicManager)
+        }
+
+        // Feed system audio to active + pending managers
+        if !sysSamples.isEmpty {
             if systemFirstSampleDate == nil { systemFirstSampleDate = Date() }
             let fmt = audioFormat
             let samples = sysSamples
-            Task { await Self.feedSamples(samples, format: fmt, to: manager) }
+            if let manager = sysMgr {
+                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
+            }
+            if let pending = pendingSys {
+                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
+            }
         }
 
-        // Feed mic audio
-        if !micSamples.isEmpty, let manager = micManager {
+        // Feed mic audio to active + pending managers
+        if !micSamples.isEmpty {
             if micFirstSampleDate == nil { micFirstSampleDate = Date() }
             let fmt = audioFormat
             let samples = micSamples
-            Task { await Self.feedSamples(samples, format: fmt, to: manager) }
+            if let manager = micMgr {
+                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
+            }
+            if let pending = pendingMic {
+                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
+            }
         }
     }
 
@@ -283,13 +344,25 @@ final class LiveTranscriptStream: @unchecked Sendable {
         let timings = update.tokenTimings
         guard !timings.isEmpty else { return }
 
-        // Update confirmed-through watermark
-        if update.isConfirmed, let lastTiming = timings.last {
+        let isHypothesis = update.isHypothesis
+
+        // Full-chunk updates: retract prior hypothesis words before emitting
+        if !isHypothesis {
+            let retractFrom = lastEmittedEnd[source] ?? 0
+            if let hypEnd = lastHypothesisEnd[source], hypEnd > retractFrom {
+                socketServer.broadcast(
+                    "{\"type\":\"retract\",\"src\":\"\(source)\",\"from\":\(String(format: "%.2f", retractFrom))}"
+                )
+            }
+            lastHypothesisEnd[source] = nil
+        }
+
+        // Update confirmed-through watermark (full-chunk only)
+        if !isHypothesis && update.isConfirmed, let lastTiming = timings.last {
             let newEnd = lastTiming.endTime + timeOffset
             let prev = confirmedEnd[source] ?? 0
             if newEnd > prev {
                 confirmedEnd[source] = newEnd
-                // Broadcast confirm event to socket clients
                 socketServer.broadcast(
                     "{\"type\":\"confirm\",\"src\":\"\(source)\",\"end\":\(String(format: "%.2f", newEnd))}"
                 )
@@ -307,7 +380,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
             if startsNewWord {
                 emitWord(
                     wordText, start: wordStart + timeOffset, end: wordEnd + timeOffset,
-                    source: source
+                    source: source, isHypothesis: isHypothesis
                 )
                 wordText = String(token.dropFirst())
                 wordStart = timing.startTime
@@ -322,20 +395,35 @@ final class LiveTranscriptStream: @unchecked Sendable {
         if !wordText.isEmpty {
             emitWord(
                 wordText, start: wordStart + timeOffset, end: wordEnd + timeOffset,
-                source: source
+                source: source, isHypothesis: isHypothesis
             )
         }
     }
 
-    private func emitWord(_ word: String, start: TimeInterval, end: TimeInterval, source: String) {
+    private func emitWord(
+        _ word: String, start: TimeInterval, end: TimeInterval,
+        source: String, isHypothesis: Bool = false
+    ) {
         let trimmed = word.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty else { return }
 
-        // Deduplicate: skip words already covered by a previous update for this source
-        if let lastEnd = lastEmittedEnd[source], end <= lastEnd + 0.01 {
-            return
+        if isHypothesis {
+            // Hypothesis dedup: skip if already emitted a hypothesis past this point
+            if let lastHypEnd = lastHypothesisEnd[source], end <= lastHypEnd + 0.01 {
+                return
+            }
+            // Also skip if full-chunk output already covers this range
+            if let lastEnd = lastEmittedEnd[source], end <= lastEnd + 0.01 {
+                return
+            }
+            lastHypothesisEnd[source] = end
+        } else {
+            // Full-chunk dedup: skip words already covered
+            if let lastEnd = lastEmittedEnd[source], end <= lastEnd + 0.01 {
+                return
+            }
+            lastEmittedEnd[source] = end
         }
-        lastEmittedEnd[source] = end
 
         let confEnd = confirmedEnd[source] ?? 0
 
@@ -343,15 +431,21 @@ final class LiveTranscriptStream: @unchecked Sendable {
         let escaped = trimmed
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
-        let line = """
+        var line = """
             {"t":\(String(format: "%.2f", start)),"end":\(String(format: "%.2f", end)),\
-            "word":"\(escaped)","src":"\(source)","conf":\(String(format: "%.2f", confEnd))}
+            "word":"\(escaped)","src":"\(source)","conf":\(String(format: "%.2f", confEnd))
             """
+        if isHypothesis {
+            line += ",\"hyp\":true}"
+        } else {
+            line += "}"
+        }
         socketServer.broadcast(line)
 
         // Yield to in-process stream for UI
         wordContinuation?.yield(TranscriptWord(
-            word: trimmed, start: start, end: end, source: source, confirmedThrough: confEnd
+            word: trimmed, start: start, end: end, source: source,
+            confirmedThrough: confEnd, isHypothesis: isHypothesis
         ))
     }
 }
