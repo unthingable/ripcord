@@ -73,22 +73,27 @@ private struct TurnView: View {
         }
     }
 
-    /// Build a Text view with confirmed words at full opacity, tentative words dimmed,
-    /// and hypothesis words further dimmed with italic.
+    /// Build a Text view with per-word styling and phrase breaks rendered as sentence spacing.
     private var styledText: Text {
-        let allWords = turn.phrases.flatMap(\.words)
-        guard !allWords.isEmpty else { return Text("") }
+        let phrases = turn.phrases
+        guard !phrases.isEmpty else { return Text("") }
         var result = Text("")
-        for (i, word) in allWords.enumerated() {
-            if i > 0 { result = result + Text(" ") }
-            if word.isHypothesis {
-                result = result + Text(word.word)
-                    .foregroundColor(.secondary.opacity(0.6))
-                    .italic()
-            } else {
-                let isConfirmed = word.end <= confirmedEnd
-                result = result + Text(word.word)
-                    .foregroundColor(isConfirmed ? nil : .secondary)
+        var wordIndex = 0
+        for (pi, phrase) in phrases.enumerated() {
+            // Insert extra space between phrases (visual sentence break)
+            if pi > 0 { result = result + Text("  ") }
+            for (wi, word) in phrase.words.enumerated() {
+                if wi > 0 { result = result + Text(" ") }
+                if word.isHypothesis {
+                    result = result + Text(word.word)
+                        .foregroundColor(.secondary.opacity(0.6))
+                        .italic()
+                } else {
+                    let isConfirmed = word.end <= confirmedEnd
+                    result = result + Text(word.word)
+                        .foregroundColor(isConfirmed ? nil : .secondary)
+                }
+                wordIndex += 1
             }
         }
         return result

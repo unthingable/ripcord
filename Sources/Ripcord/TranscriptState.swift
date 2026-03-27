@@ -54,6 +54,7 @@ final class TranscriptState {
     private(set) var confirmedThrough: [String: TimeInterval] = [:]
 
     private static let pauseThreshold: TimeInterval = 0.5
+    private static let turnBreakThreshold: TimeInterval = 2.0
 
     private var consumeTask: Task<Void, Never>?
 
@@ -99,18 +100,33 @@ final class TranscriptState {
 
     /// Append a word to the turn/phrase structure (standard path for both full-chunk and hypothesis).
     private func appendWord(_ word: TranscriptWord) {
-        if var lastTurn = turns.last, lastTurn.source == word.source {
-            if var lastPhrase = lastTurn.phrases.last,
-               let lastEnd = lastPhrase.words.last?.end,
-               word.start - lastEnd < Self.pauseThreshold
-            {
+        if var lastTurn = turns.last, lastTurn.source == word.source,
+           let lastEnd = lastTurn.phrases.last?.words.last?.end
+        {
+            let gap = word.start - lastEnd
+
+            if gap >= Self.turnBreakThreshold {
+                // Long pause — start a new turn (same speaker, new "message")
+                let phrase = TranscriptPhrase(words: [word], source: word.source)
+                turns.append(TranscriptTurn(source: word.source, phrases: [phrase]))
+            } else if gap >= Self.pauseThreshold {
+                // Short pause — new phrase within the same turn
+                lastTurn.phrases.append(TranscriptPhrase(words: [word], source: word.source))
+                turns[turns.count - 1] = lastTurn
+            } else {
+                // Continuous speech — append to current phrase
+                var lastPhrase = lastTurn.phrases[lastTurn.phrases.count - 1]
                 lastPhrase.words.append(word)
                 lastTurn.phrases[lastTurn.phrases.count - 1] = lastPhrase
-            } else {
-                lastTurn.phrases.append(TranscriptPhrase(words: [word], source: word.source))
+                turns[turns.count - 1] = lastTurn
             }
+        } else if turns.last?.source == word.source {
+            // Same source but no words yet (empty turn after retraction)
+            var lastTurn = turns[turns.count - 1]
+            lastTurn.phrases.append(TranscriptPhrase(words: [word], source: word.source))
             turns[turns.count - 1] = lastTurn
         } else {
+            // Different speaker or first word
             let phrase = TranscriptPhrase(words: [word], source: word.source)
             turns.append(TranscriptTurn(source: word.source, phrases: [phrase]))
         }
