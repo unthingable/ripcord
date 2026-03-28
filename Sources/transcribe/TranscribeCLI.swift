@@ -170,7 +170,7 @@ struct TranscribeCLI: AsyncParsableCommand {
         if finalOutputPath != outputPath {
             log("Output (renamed): \(finalOutputPath)")
         }
-        transcriber.cleanup()
+        await transcriber.cleanup()
     }
 }
 

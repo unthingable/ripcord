@@ -11,7 +11,7 @@ let package = Package(
         .library(name: "TranscribeKit", targets: ["TranscribeKit"]),
     ],
     dependencies: [
-        .package(url: "https://github.com/FluidInference/FluidAudio.git", from: "0.7.9"),
+        .package(url: "https://github.com/unthingable/FluidAudio.git", branch: "feat/hypothesis-windows"),
         .package(url: "https://github.com/apple/swift-argument-parser.git", from: "1.3.0"),
     ],
     targets: [

@@ -146,13 +146,13 @@ public final class Transcriber: @unchecked Sendable {
         return TranscriptionResult(segments: segments, duration: duration, speakers: speakers, speakerEmbeddings: diarizationResult?.speakerDatabase)
     }
 
-    public func cleanup() {
+    public func cleanup() async {
         let asr = lock.withLock { () -> AsrManager? in
             let a = asrManager
             asrManager = nil
             return a
         }
-        asr?.cleanup()
+        await asr?.cleanup()
     }
 
     // MARK: - Errors

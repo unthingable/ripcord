@@ -8,7 +8,7 @@ private let logger = Logger(subsystem: "com.vibe.ripcord", category: "LiveTransc
 /// Manages streaming ASR for live transcript output over a socket.
 ///
 /// Feeds audio from CoreAudio callbacks (via a non-RT handoff queue) to one or two
-/// `StreamingAsrManager` instances, converts token timings to JSONL, and broadcasts
+/// `SlidingWindowAsrManager` instances, converts token timings to JSONL, and broadcasts
 /// via a `TranscriptSocketServer`.
 final class LiveTranscriptStream: @unchecked Sendable {
     private let socketServer: TranscriptSocketServer
@@ -16,12 +16,12 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     // Streaming ASR managers (actors — must be called from async context)
     // Protected by managerLock when read from flushQueue.
-    private var systemManager: StreamingAsrManager?
-    private var micManager: StreamingAsrManager?
+    private var systemManager: SlidingWindowAsrManager?
+    private var micManager: SlidingWindowAsrManager?
 
     // Pending managers during hot-swap reconfigure (fed in parallel with active managers)
-    private var pendingSystemManager: StreamingAsrManager?
-    private var pendingMicManager: StreamingAsrManager?
+    private var pendingSystemManager: SlidingWindowAsrManager?
+    private var pendingMicManager: SlidingWindowAsrManager?
 
     // Protects manager pointer reads/writes between flushQueue and async contexts
     private let managerLock = NSLock()
@@ -83,7 +83,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
         minContextForConfirmation: Double = 5.0,
         confirmationThreshold: Double = 0.65
     ) async throws {
-        let config = StreamingAsrConfig(
+        let config = SlidingWindowAsrConfig(
             chunkSeconds: chunkSeconds,
             hypothesisChunkSeconds: max(0.5, chunkSeconds / 2),
             leftContextSeconds: chunkSeconds,
@@ -100,8 +100,8 @@ final class LiveTranscriptStream: @unchecked Sendable {
         micFirstSampleDate = nil
 
         // Create managers
-        let sysMgr = StreamingAsrManager(config: config)
-        let micMgr = StreamingAsrManager(config: config)
+        let sysMgr = SlidingWindowAsrManager(config: config)
+        let micMgr = SlidingWindowAsrManager(config: config)
         systemManager = sysMgr
         micManager = micMgr
 
@@ -142,7 +142,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
         minContextForConfirmation: Double = 5.0,
         confirmationThreshold: Double = 0.65
     ) async throws {
-        let config = StreamingAsrConfig(
+        let config = SlidingWindowAsrConfig(
             chunkSeconds: chunkSeconds,
             hypothesisChunkSeconds: max(0.5, chunkSeconds / 2),
             leftContextSeconds: chunkSeconds,
@@ -152,8 +152,8 @@ final class LiveTranscriptStream: @unchecked Sendable {
         )
 
         // 1. Create pending managers and make them visible to flushPendingSamples
-        let newSysMgr = StreamingAsrManager(config: config)
-        let newMicMgr = StreamingAsrManager(config: config)
+        let newSysMgr = SlidingWindowAsrManager(config: config)
+        let newMicMgr = SlidingWindowAsrManager(config: config)
         managerLock.withLock {
             pendingSystemManager = newSysMgr
             pendingMicManager = newMicMgr
@@ -314,7 +314,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
     /// Creates an AVAudioPCMBuffer from samples and feeds it to the ASR manager.
     /// Runs inside a Task to satisfy actor isolation requirements.
     private static func feedSamples(
-        _ samples: [Float], format: AVAudioFormat, to manager: StreamingAsrManager
+        _ samples: [Float], format: AVAudioFormat, to manager: SlidingWindowAsrManager
     ) async {
         let frameCount = AVAudioFrameCount(samples.count)
         guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
@@ -330,7 +330,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     // MARK: - Transcription update handling
 
-    private func handleUpdate(_ update: StreamingTranscriptionUpdate, source: String) {
+    private func handleUpdate(_ update: SlidingWindowTranscriptionUpdate, source: String) {
         let sourceFirstDate: Date?
         if source == "sys" {
             sourceFirstDate = systemFirstSampleDate
