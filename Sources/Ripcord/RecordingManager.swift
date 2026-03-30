@@ -1263,14 +1263,6 @@ final class RecordingManager: @unchecked Sendable {
 
 
 
-    func toggleLiveTranscript() async {
-        if liveTranscriptEnabled {
-            await startLiveTranscript()
-        } else {
-            await stopLiveTranscript()
-        }
-    }
-
     // MARK: - Private
 
     // Audio always flows to circular buffers (continuous waveform); also to pending when recording.

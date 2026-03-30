@@ -44,6 +44,7 @@ final class LiveTranscriptStream: @unchecked Sendable {
     private(set) var wordStream: AsyncStream<TranscriptWord>?
 
     // Deduplication: track last emitted word end time per source (full-chunk, monotonic)
+    // Protected by updateLock (accessed from sys + mic consumer Tasks concurrently)
     private var lastEmittedEnd: [String: TimeInterval] = [:]
 
     // Deduplication for hypothesis words (rewindable — reset when full-chunk arrives)
@@ -51,6 +52,9 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     // Confirmation tracking: end time of last confirmed update per source
     private var confirmedEnd: [String: TimeInterval] = [:]
+
+    // Serializes handleUpdate / emitWord across sys + mic consumer Tasks
+    private let updateLock = NSLock()
 
     // Timestamp alignment — shared epoch for both streams
     private let startDate = Date()
@@ -93,11 +97,13 @@ final class LiveTranscriptStream: @unchecked Sendable {
         )
 
         // Reset state from any prior stream
-        lastEmittedEnd.removeAll()
-        lastHypothesisEnd.removeAll()
-        confirmedEnd.removeAll()
-        systemFirstSampleDate = nil
-        micFirstSampleDate = nil
+        updateLock.withLock {
+            lastEmittedEnd.removeAll()
+            lastHypothesisEnd.removeAll()
+            confirmedEnd.removeAll()
+            systemFirstSampleDate = nil
+            micFirstSampleDate = nil
+        }
 
         // Create managers
         let sysMgr = SlidingWindowAsrManager(config: config)
@@ -192,11 +198,13 @@ final class LiveTranscriptStream: @unchecked Sendable {
         micConsumerTask = newMicTask
 
         // Reset deduplication, confirmation, and timestamp alignment for new managers
-        lastEmittedEnd.removeAll()
-        lastHypothesisEnd.removeAll()
-        confirmedEnd.removeAll()
-        systemFirstSampleDate = nil
-        micFirstSampleDate = nil
+        updateLock.withLock {
+            lastEmittedEnd.removeAll()
+            lastHypothesisEnd.removeAll()
+            confirmedEnd.removeAll()
+            systemFirstSampleDate = nil
+            micFirstSampleDate = nil
+        }
 
         // 6. Drain old managers (fire-and-forget — non-blocking cleanup)
         oldSysTask?.cancel()
@@ -331,76 +339,74 @@ final class LiveTranscriptStream: @unchecked Sendable {
     // MARK: - Transcription update handling
 
     private func handleUpdate(_ update: SlidingWindowTranscriptionUpdate, source: String) {
-        let sourceFirstDate: Date?
-        if source == "sys" {
-            sourceFirstDate = systemFirstSampleDate
-        } else {
-            sourceFirstDate = micFirstSampleDate
-        }
-        let timeOffset = sourceFirstDate?.timeIntervalSince(startDate) ?? 0
-
-        // Join sub-word tokens into words.
-        // Parakeet SentencePiece: tokens starting with a space begin a new word.
         let timings = update.tokenTimings
         guard !timings.isEmpty else { return }
 
-        let isHypothesis = update.isHypothesis
+        updateLock.withLock {
+            let sourceFirstDate: Date? = source == "sys" ? systemFirstSampleDate : micFirstSampleDate
+            let timeOffset = sourceFirstDate?.timeIntervalSince(startDate) ?? 0
 
-        // Full-chunk updates: retract prior hypothesis words before emitting
-        if !isHypothesis {
-            let retractFrom = lastEmittedEnd[source] ?? 0
-            if let hypEnd = lastHypothesisEnd[source], hypEnd > retractFrom {
-                socketServer.broadcast(
-                    "{\"type\":\"retract\",\"src\":\"\(source)\",\"from\":\(String(format: "%.2f", retractFrom))}"
-                )
+            let isHypothesis = update.isHypothesis
+
+            // Full-chunk updates: retract prior hypothesis words before emitting
+            if !isHypothesis {
+                let retractFrom = lastEmittedEnd[source] ?? 0
+                if let hypEnd = lastHypothesisEnd[source], hypEnd > retractFrom {
+                    socketServer.broadcast(
+                        "{\"type\":\"retract\",\"src\":\"\(source)\",\"from\":\(String(format: "%.2f", retractFrom))}"
+                    )
+                }
+                lastHypothesisEnd[source] = nil
             }
-            lastHypothesisEnd[source] = nil
-        }
 
-        // Update confirmed-through watermark (full-chunk only)
-        if !isHypothesis && update.isConfirmed, let lastTiming = timings.last {
-            let newEnd = lastTiming.endTime + timeOffset
-            let prev = confirmedEnd[source] ?? 0
-            if newEnd > prev {
-                confirmedEnd[source] = newEnd
-                socketServer.broadcast(
-                    "{\"type\":\"confirm\",\"src\":\"\(source)\",\"end\":\(String(format: "%.2f", newEnd))}"
-                )
+            // Update confirmed-through watermark (full-chunk only)
+            if !isHypothesis && update.isConfirmed, let lastTiming = timings.last {
+                let newEnd = lastTiming.endTime + timeOffset
+                let prev = confirmedEnd[source] ?? 0
+                if newEnd > prev {
+                    confirmedEnd[source] = newEnd
+                    socketServer.broadcast(
+                        "{\"type\":\"confirm\",\"src\":\"\(source)\",\"end\":\(String(format: "%.2f", newEnd))}"
+                    )
+                }
             }
-        }
 
-        var wordStart: TimeInterval = timings[0].startTime
-        var wordEnd: TimeInterval = timings[0].endTime
-        var wordText = ""
+            // Join sub-word tokens into words.
+            // Parakeet SentencePiece: tokens starting with a space begin a new word.
+            var wordStart: TimeInterval = timings[0].startTime
+            var wordEnd: TimeInterval = timings[0].endTime
+            var wordText = ""
 
-        for timing in timings {
-            let token = timing.token
-            let startsNewWord = token.hasPrefix(" ") && !wordText.isEmpty
+            for timing in timings {
+                let token = timing.token
+                let startsNewWord = token.hasPrefix(" ") && !wordText.isEmpty
 
-            if startsNewWord {
-                emitWord(
+                if startsNewWord {
+                    emitWordLocked(
+                        wordText, start: wordStart + timeOffset, end: wordEnd + timeOffset,
+                        source: source, isHypothesis: isHypothesis
+                    )
+                    wordText = String(token.dropFirst())
+                    wordStart = timing.startTime
+                    wordEnd = timing.endTime
+                } else {
+                    let piece = token.hasPrefix(" ") ? String(token.dropFirst()) : token
+                    wordText += piece
+                    wordEnd = timing.endTime
+                }
+            }
+
+            if !wordText.isEmpty {
+                emitWordLocked(
                     wordText, start: wordStart + timeOffset, end: wordEnd + timeOffset,
                     source: source, isHypothesis: isHypothesis
                 )
-                wordText = String(token.dropFirst())
-                wordStart = timing.startTime
-                wordEnd = timing.endTime
-            } else {
-                let piece = token.hasPrefix(" ") ? String(token.dropFirst()) : token
-                wordText += piece
-                wordEnd = timing.endTime
             }
-        }
-
-        if !wordText.isEmpty {
-            emitWord(
-                wordText, start: wordStart + timeOffset, end: wordEnd + timeOffset,
-                source: source, isHypothesis: isHypothesis
-            )
         }
     }
 
-    private func emitWord(
+    /// Must be called under updateLock.
+    private func emitWordLocked(
         _ word: String, start: TimeInterval, end: TimeInterval,
         source: String, isHypothesis: Bool = false
     ) {

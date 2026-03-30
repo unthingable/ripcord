@@ -117,18 +117,19 @@ final class TranscriptSocketServer: @unchecked Sendable {
         acceptSource?.cancel()
         acceptSource = nil
 
+        // Cancel read sources synchronously on queue BEFORE closing FDs
+        // to prevent use-after-close races
+        queue.sync {
+            for (_, source) in readSources {
+                source.cancel()
+            }
+            readSources.removeAll()
+            readBuffers.removeAll()
+        }
+
         clientLock.withLock {
             for fd in clientFDs { close(fd) }
             clientFDs.removeAll()
-        }
-
-        // Clean up read state on queue
-        queue.async { [self] in
-            for (_, source) in self.readSources {
-                source.cancel()
-            }
-            self.readSources.removeAll()
-            self.readBuffers.removeAll()
         }
 
         if listenFD >= 0 {
@@ -161,7 +162,6 @@ final class TranscriptSocketServer: @unchecked Sendable {
             var deadIndices: [Int] = []
             for (i, fd) in clientFDs.enumerated() {
                 if !sendToClient(fd, message: message) {
-                    close(fd)
                     deadFDs.append(fd)
                     deadIndices.append(i)
                 }
@@ -173,14 +173,15 @@ final class TranscriptSocketServer: @unchecked Sendable {
             }
         }
 
-        // Cancel read sources for dead clients (must happen on queue)
+        // Cancel read sources BEFORE closing FDs to prevent use-after-close
         if !deadFDs.isEmpty {
             let fds = deadFDs
-            queue.async { [weak self] in
+            queue.sync { [weak self] in
                 for fd in fds {
                     self?.readSources[fd]?.cancel()
                 }
             }
+            for fd in fds { close(fd) }
         }
     }
 

@@ -327,13 +327,8 @@ struct ContentView: View {
         let sysLevel = manager.systemLevel
         let micLevel = manager.micLevel
         HStack(spacing: 2) {
-            if manager.channelSplit {
-                verticalMeter(level: sysLevel, color: .blue)
-                verticalMeter(level: micLevel, color: .cyan)
-            } else {
-                verticalMeter(level: sysLevel, color: .blue)
-                verticalMeter(level: micLevel, color: .cyan)
-            }
+            verticalMeter(level: sysLevel, color: .blue)
+            verticalMeter(level: micLevel, color: .cyan)
         }
         .frame(width: 12)
     }

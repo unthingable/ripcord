@@ -74,7 +74,7 @@ struct CopilotView: View {
             minContext = manager.liveTranscriptMinContext
             confirmThreshold = manager.liveTranscriptConfirmThreshold
         }
-        .task {
+        .task(id: manager.liveTranscriptStream.map { ObjectIdentifier($0) }) {
             await connectToStream()
         }
         .onDisappear {
