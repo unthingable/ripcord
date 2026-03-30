@@ -192,7 +192,7 @@ struct SettingsView: View {
                             Task { await manager.setLiveTranscriptEnabled(enabled) }
                         }
                     ))
-                    .disabled(!manager.transcriptionService.modelsReady)
+                    .disabled(!manager.transcriptionService.modelsLoaded)
 
                     LabeledContent("Socket") {
                         Text("/tmp/ripcord-transcript.sock")

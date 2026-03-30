@@ -179,7 +179,7 @@ struct ContentView: View {
         case .recording:
             return manager.isSilencePaused ? .red.opacity(0.4) : .red
         case .paused: return .orange
-        case .error: return .orange
+        case .error: return .pink
         }
     }
 
@@ -329,11 +329,10 @@ struct ContentView: View {
         HStack(spacing: 2) {
             if manager.channelSplit {
                 verticalMeter(level: sysLevel, color: .blue)
-                verticalMeter(level: micLevel, color: .green)
+                verticalMeter(level: micLevel, color: .cyan)
             } else {
-                let combined = max(sysLevel, micLevel)
-                verticalMeter(level: combined, color: .purple)
-                verticalMeter(level: combined, color: .purple)
+                verticalMeter(level: sysLevel, color: .blue)
+                verticalMeter(level: micLevel, color: .cyan)
             }
         }
         .frame(width: 12)
@@ -519,7 +518,6 @@ struct ContentView: View {
             }
             .menuStyle(.borderlessButton)
             .fixedSize(horizontal: false, vertical: true)
-            .disabled(!manager.micEnabled)
             .opacity(manager.micEnabled ? 1 : 0.4)
 
             VStack(spacing: 2) {
@@ -549,8 +547,8 @@ struct ContentView: View {
                         .overlay(Circle().stroke(trueStereo ? .blue : .secondary, lineWidth: 1.2))
                         .frame(width: 8, height: 8)
                     Circle()
-                        .fill(trueStereo ? Color.green.opacity(0.25) : split ? .secondary.opacity(0.4) : .clear)
-                        .overlay(Circle().stroke(trueStereo ? .green : .secondary, lineWidth: 1.2))
+                        .fill(trueStereo ? Color.cyan.opacity(0.25) : split ? .secondary.opacity(0.4) : .clear)
+                        .overlay(Circle().stroke(trueStereo ? .cyan : .secondary, lineWidth: 1.2))
                         .frame(width: 8, height: 8)
                 }
                 .frame(height: 10)
@@ -585,7 +583,7 @@ struct ContentView: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
-                .disabled(!manager.transcriptionService.modelsReady)
+                .disabled(!manager.transcriptionService.modelsLoaded)
             }
             .help("Live Transcript")
         }
@@ -738,8 +736,8 @@ private struct RecordingRowView: View {
                             .font(.caption2)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
-                            .background(Capsule().fill(.blue.opacity(0.2)))
-                            .foregroundStyle(.blue)
+                            .background(Capsule().fill(.teal.opacity(0.2)))
+                            .foregroundStyle(.teal)
                     }
                     .buttonStyle(.plain)
                     .help("Name new speakers")
@@ -871,7 +869,7 @@ private struct SpeakerNamingPopover: View {
                         Button(action: { playSample(speakerID: speaker.id) }) {
                             Image(systemName: playingSpeaker == speaker.id ? "stop.fill" : "play.fill")
                                 .font(.caption)
-                                .foregroundStyle(.blue)
+                                .foregroundStyle(.cyan)
                                 .frame(width: 14)
                         }
                         .buttonStyle(.plain)
@@ -913,6 +911,7 @@ private struct SpeakerNamingPopover: View {
         }
         .padding(10)
         .frame(width: 280)
+        .background(Color(nsColor: .windowBackgroundColor))
         .onDisappear { stopPlayback() }
     }
 
@@ -1151,5 +1150,6 @@ struct TranscriptionConfigPopover: View {
         }
         .padding(10)
         .frame(width: 220)
+        .background(Color(nsColor: .windowBackgroundColor))
     }
 }

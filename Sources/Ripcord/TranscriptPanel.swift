@@ -58,7 +58,7 @@ private struct TurnView: View {
                 Text(turn.speakerLabel)
                     .font(.caption)
                     .fontWeight(.semibold)
-                    .foregroundStyle(turn.source == "mic" ? .blue : .secondary)
+                    .foregroundStyle(turn.source == "mic" ? .cyan : .blue)
                 if let t = turn.startTime {
                     Text(formatTimestamp(t))
                         .font(.caption2)
