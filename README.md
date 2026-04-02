@@ -17,11 +17,16 @@ macOS menubar app for retroactive audio recording with transcription.
 - **Silence auto-pause** — automatically pauses recording during silence
 - **Built-in transcription** with speaker diarization (via [FluidAudio](https://github.com/FluidInference/FluidAudio))
 - **Transcript formats** — txt, md, json, srt, vtt
+- **Live transcript** — real-time streaming transcription in a dedicated window with tunable parameters
+- **Speaker identity persistence** — voice profiles saved across transcriptions with automatic matching
+- **Video file transcription** — transcribe audio from MP4, MOV, AVI, and other video formats
 - **Filler word removal** — strip um, uh, etc. from transcripts
 - **Re-transcribe** — re-process recordings with different settings
-- **Transcribe external files** — import and transcribe any audio file
+- **Transcribe external files** — import and transcribe any audio/video file
+- **Remote control socket** — Unix domain socket for external tools to receive live transcript data
 - **Recent recordings** — quick access with copy-transcript and re-transcribe actions
 - **`transcribe` CLI** for batch transcription
+- **Appearance themes** — System, Light, or Dark
 - **Global hotkey** — Cmd+Shift+R
 - **Launch at login** — optional auto-start with macOS
 
@@ -59,7 +64,7 @@ Launch Ripcord from the menubar. It immediately starts filling a circular buffer
 - **Click Record** (or press Cmd+Shift+R) to save — the recording includes the selected buffer plus any new audio going forward
 - **Click Stop** to finish — the file is saved to the output directory
 
-The **waveform** shows live audio amplitude. During buffering, the highlighted region shows how much audio will be captured; during recording, the entire waveform turns red. The **level meters** on the right show two bars — blue+green in split mode, purple in mixed mode.
+The **waveform** shows live audio amplitude. During buffering, the highlighted region shows how much audio will be captured; during recording, the entire waveform turns red. The **level meters** on the right show two bars — blue for system audio, cyan for mic.
 
 ### Microphone
 

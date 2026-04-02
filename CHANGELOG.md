@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.10.0
+
+- **Live transcript** — real-time streaming transcription displayed in a dedicated window. Uses sliding-window ASR with tunable chunk size, lookahead, and confirmation threshold. Includes hypothesis (in-progress) word display that updates as speech is recognized.
+- **Remote control socket** — Unix domain socket at `/tmp/ripcord-transcript.sock` for external tools to receive live transcript JSONL and send commands. Supports replay-on-connect so late joiners get recent history.
+- **Video file transcription** — transcribe audio from video files (MP4, MOV, AVI) in addition to audio formats.
+- **Speaker identity persistence** — speaker voice profiles are saved across transcriptions. When a known speaker appears in a new recording, they're automatically matched. New speakers get similarity-ranked name suggestions from existing profiles.
+- **Appearance theme override** — choose between System, Light, and Dark themes in Settings.
+- Fix mic capture blocking meeting apps (Zoom, Teams, etc.) from initializing their audio pipeline. The system capture aggregate device was triggering Voice Isolation exceptions in VPIO — resolved by disabling auto-start on the aggregate.
+- Fix live transcript window not reconnecting when the stream is toggled off and back on.
+- Fix data race in live transcript where system and mic consumer tasks could corrupt shared state.
+- Fix socket server closing file descriptors before cancelling their read sources, risking use-after-close on recycled FDs.
+- Fix speaker name suggestion dropdown staying open after selecting a name.
+- Fix popover panels (speaker naming, transcription config) being translucent when the main window is opaque.
+- Fix live transcript toggle being disabled during file transcription — it uses independent ASR instances and doesn't conflict.
+
 ## 0.9.1
 
 - Fix mic capture blocking other apps' audio negotiation. CoreAudio listeners now run on dedicated serial queues with debouncing, so events like AirPods connecting during a Zoom call produce a single clean restart instead of cascading teardown loops.
