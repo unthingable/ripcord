@@ -1,4 +1,4 @@
-import AVFoundation
+@preconcurrency import AVFoundation
 import FluidAudio
 import Foundation
 import os.log
@@ -12,7 +12,6 @@ private let logger = Logger(subsystem: "com.vibe.ripcord", category: "LiveTransc
 /// via a `TranscriptSocketServer`.
 final class LiveTranscriptStream: @unchecked Sendable {
     private let socketServer: TranscriptSocketServer
-    private let audioFormat: AVAudioFormat
 
     // Streaming ASR managers (actors — must be called from async context)
     // Protected by managerLock when read from flushQueue.
@@ -65,12 +64,6 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     init(socketServer: TranscriptSocketServer) {
         self.socketServer = socketServer
-        self.audioFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: AudioConstants.sampleRate,
-            channels: 1,
-            interleaved: false
-        )!
 
         // Create in-process word stream for UI consumption
         var continuation: AsyncStream<TranscriptWord>.Continuation!
@@ -292,52 +285,41 @@ final class LiveTranscriptStream: @unchecked Sendable {
             (systemManager, micManager, pendingSystemManager, pendingMicManager)
         }
 
-        // AVAudioFormat is not Sendable but audioFormat is immutable — safe to share.
-        nonisolated(unsafe) let fmt = audioFormat
-
         // Feed system audio to active + pending managers
         if !sysSamples.isEmpty {
             if systemFirstSampleDate == nil { systemFirstSampleDate = Date() }
-            let samples = sysSamples
-            if let manager = sysMgr {
-                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
-            }
-            if let pending = pendingSys {
-                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
-            }
+            if let mgr = sysMgr { Self.feedManager(mgr, samples: sysSamples) }
+            if let mgr = pendingSys { Self.feedManager(mgr, samples: sysSamples) }
         }
 
         // Feed mic audio to active + pending managers
         if !micSamples.isEmpty {
             if micFirstSampleDate == nil { micFirstSampleDate = Date() }
-            let samples = micSamples
-            if let manager = micMgr {
-                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
-            }
-            if let pending = pendingMic {
-                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
-            }
+            if let mgr = micMgr { Self.feedManager(mgr, samples: micSamples) }
+            if let mgr = pendingMic { Self.feedManager(mgr, samples: micSamples) }
         }
     }
 
-    /// Creates an AVAudioPCMBuffer from samples and feeds it to the ASR manager.
-    /// Runs inside a Task to satisfy actor isolation requirements.
-    private static func feedSamples(
-        _ samples: [Float], format: AVAudioFormat, to manager: SlidingWindowAsrManager
-    ) async {
-        let frameCount = AVAudioFrameCount(samples.count)
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
-            return
+    private static let bufferFormat = AVAudioFormat(
+        commonFormat: .pcmFormatFloat32,
+        sampleRate: AudioConstants.sampleRate,
+        channels: 1,
+        interleaved: false
+    )!
+
+    /// Sends samples to a manager in a Task. Buffer is created inside the Task
+    /// to satisfy Swift 6 sending requirements.
+    private static func feedManager(_ manager: SlidingWindowAsrManager, samples: [Float]) {
+        Task {
+            let frameCount = AVAudioFrameCount(samples.count)
+            guard let buffer = AVAudioPCMBuffer(pcmFormat: bufferFormat, frameCapacity: frameCount),
+                  let channelData = buffer.floatChannelData else { return }
+            samples.withUnsafeBufferPointer { src in
+                channelData[0].update(from: src.baseAddress!, count: samples.count)
+            }
+            buffer.frameLength = frameCount
+            await manager.streamAudio(buffer)
         }
-        guard let channelData = buffer.floatChannelData else { return }
-        samples.withUnsafeBufferPointer { src in
-            channelData[0].update(from: src.baseAddress!, count: samples.count)
-        }
-        buffer.frameLength = frameCount
-        // AVAudioPCMBuffer is not Sendable but we just created it and transfer
-        // ownership exclusively to the actor — safe to cross the isolation boundary.
-        nonisolated(unsafe) let sendableBuffer = buffer
-        await manager.streamAudio(sendableBuffer)
     }
 
     // MARK: - Transcription update handling
