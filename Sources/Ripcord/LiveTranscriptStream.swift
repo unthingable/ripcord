@@ -292,27 +292,30 @@ final class LiveTranscriptStream: @unchecked Sendable {
             (systemManager, micManager, pendingSystemManager, pendingMicManager)
         }
 
+        // AVAudioFormat is not Sendable but audioFormat is immutable — safe to share.
+        nonisolated(unsafe) let fmt = audioFormat
+
         // Feed system audio to active + pending managers
         if !sysSamples.isEmpty {
             if systemFirstSampleDate == nil { systemFirstSampleDate = Date() }
-            let fmt = audioFormat
+            let samples = sysSamples
             if let manager = sysMgr {
-                Task { @Sendable in await Self.feedSamples(sysSamples, format: fmt, to: manager) }
+                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
             }
             if let pending = pendingSys {
-                Task { @Sendable in await Self.feedSamples(sysSamples, format: fmt, to: pending) }
+                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
             }
         }
 
         // Feed mic audio to active + pending managers
         if !micSamples.isEmpty {
             if micFirstSampleDate == nil { micFirstSampleDate = Date() }
-            let fmt = audioFormat
+            let samples = micSamples
             if let manager = micMgr {
-                Task { @Sendable in await Self.feedSamples(micSamples, format: fmt, to: manager) }
+                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
             }
             if let pending = pendingMic {
-                Task { @Sendable in await Self.feedSamples(micSamples, format: fmt, to: pending) }
+                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
             }
         }
     }
