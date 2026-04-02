@@ -1005,7 +1005,9 @@ private struct SpeakerNameField: View {
 
     private var filteredSuggestions: [String] {
         guard !name.isEmpty else { return rankedNames }
-        return rankedNames.filter { $0.localizedCaseInsensitiveContains(name) }
+        return rankedNames.filter {
+            $0.localizedCaseInsensitiveContains(name) && $0.caseInsensitiveCompare(name) != .orderedSame
+        }
     }
 }
 
