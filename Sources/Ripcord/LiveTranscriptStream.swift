@@ -296,12 +296,11 @@ final class LiveTranscriptStream: @unchecked Sendable {
         if !sysSamples.isEmpty {
             if systemFirstSampleDate == nil { systemFirstSampleDate = Date() }
             let fmt = audioFormat
-            let samples = sysSamples
             if let manager = sysMgr {
-                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
+                Task { @Sendable in await Self.feedSamples(sysSamples, format: fmt, to: manager) }
             }
             if let pending = pendingSys {
-                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
+                Task { @Sendable in await Self.feedSamples(sysSamples, format: fmt, to: pending) }
             }
         }
 
@@ -309,12 +308,11 @@ final class LiveTranscriptStream: @unchecked Sendable {
         if !micSamples.isEmpty {
             if micFirstSampleDate == nil { micFirstSampleDate = Date() }
             let fmt = audioFormat
-            let samples = micSamples
             if let manager = micMgr {
-                Task { await Self.feedSamples(samples, format: fmt, to: manager) }
+                Task { @Sendable in await Self.feedSamples(micSamples, format: fmt, to: manager) }
             }
             if let pending = pendingMic {
-                Task { await Self.feedSamples(samples, format: fmt, to: pending) }
+                Task { @Sendable in await Self.feedSamples(micSamples, format: fmt, to: pending) }
             }
         }
     }
@@ -333,7 +331,10 @@ final class LiveTranscriptStream: @unchecked Sendable {
             channelData[0].update(from: src.baseAddress!, count: samples.count)
         }
         buffer.frameLength = frameCount
-        await manager.streamAudio(buffer)
+        // AVAudioPCMBuffer is not Sendable but we just created it and transfer
+        // ownership exclusively to the actor — safe to cross the isolation boundary.
+        nonisolated(unsafe) let sendableBuffer = buffer
+        await manager.streamAudio(sendableBuffer)
     }
 
     // MARK: - Transcription update handling
