@@ -14,7 +14,8 @@ struct ContentView: View {
     @State private var fileTranscribeURL: URL?
     @State private var renamingURL: URL?
     @State private var renameText: String = ""
-    @State private var settingsCloseObserver: NSObjectProtocol?
+    // Stored outside @State to avoid MainActor-isolation issues in NotificationCenter closures
+    private static nonisolated(unsafe) var settingsCloseObserver: NSObjectProtocol?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -147,20 +148,25 @@ struct ContentView: View {
         let panel = menuBarWindow
         panel?.close()
         openSettings()
-        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
-            NSApp.activate(ignoringOtherApps: true)
-            if let settings = NSApp.windows.first(where: {
-                $0 != panel && $0.canBecomeKey && $0.isVisible
-            }) {
-                settingsCloseObserver = NotificationCenter.default.addObserver(
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) { @Sendable in
+            MainActor.assumeIsolated {
+                NSApp.activate(ignoringOtherApps: true)
+                guard let settings = NSApp.windows.first(where: {
+                    $0 != panel && $0.canBecomeKey && $0.isVisible
+                }) else { return }
+                if let obs = Self.settingsCloseObserver {
+                    NotificationCenter.default.removeObserver(obs)
+                }
+                Self.settingsCloseObserver = NotificationCenter.default.addObserver(
                     forName: NSWindow.willCloseNotification, object: settings, queue: .main
-                ) { _ in
-                    if let obs = settingsCloseObserver {
-                        NotificationCenter.default.removeObserver(obs)
-                        settingsCloseObserver = nil
+                ) { @Sendable [weak panel] _ in
+                    MainActor.assumeIsolated {
+                        if let obs = Self.settingsCloseObserver {
+                            NotificationCenter.default.removeObserver(obs)
+                            Self.settingsCloseObserver = nil
+                        }
+                        panel?.makeKeyAndOrderFront(nil)
                     }
-                    // Reopen the MenuBarExtra panel
-                    panel?.makeKeyAndOrderFront(nil)
                 }
             }
         }
