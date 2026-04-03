@@ -56,6 +56,7 @@ enum SettingsKey {
     static let liveTranscriptRightContext = "ripcord.liveTranscriptRightContext"
     static let liveTranscriptMinContext = "ripcord.liveTranscriptMinContext"
     static let liveTranscriptConfirmThreshold = "ripcord.liveTranscriptConfirmThreshold"
+    static let modelDownloadPromptDismissed = "ripcord.modelDownloadPromptDismissed"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -389,6 +390,10 @@ final class RecordingManager: @unchecked Sendable {
         await MainActor.run {
             self.state = .buffering
         }
+
+        // Ensure output directory exists before loading recordings or monitoring it
+        let dir = await MainActor.run { outputDirectory }
+        try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
         await loadRecentRecordings()
         await MainActor.run {
@@ -852,7 +857,15 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func downloadTranscriptionModels() {
-        Task { await transcriptionService.prepareModels(config: transcriptionConfig) }
+        Task {
+            await transcriptionService.prepareModels(config: transcriptionConfig)
+            // Auto-enable transcription on first successful download
+            await MainActor.run {
+                if transcriptionService.modelsReady && !transcriptionEnabled {
+                    updateTranscriptionEnabled(true)
+                }
+            }
+        }
     }
 
     func updateTranscriptionConfig(_ config: TranscriptionConfig) {

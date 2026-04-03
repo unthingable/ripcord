@@ -89,12 +89,23 @@ struct ContentView: View {
                         Text("Loading models…")
                             .font(.caption2)
                     }
-                } else if case .downloadingModels = manager.transcriptionService.state {
+                } else if case .downloadingModels(let progress) = manager.transcriptionService.state {
                     HStack(spacing: 4) {
-                        ProgressView().controlSize(.small)
-                        Text("Downloading models…")
+                        ProgressView(value: progress).frame(width: 60)
+                        Text("Downloading…")
                             .font(.caption2)
                     }
+                } else if case .idle = manager.transcriptionService.state {
+                    Button("Download Models\u{2026}") {
+                        manager.downloadTranscriptionModels()
+                    }
+                    .font(.caption)
+                } else if case .failed = manager.transcriptionService.state {
+                    Button("Retry Model Download") {
+                        manager.downloadTranscriptionModels()
+                    }
+                    .font(.caption)
+                    .foregroundStyle(.red)
                 }
 
                 Spacer()
@@ -130,6 +141,20 @@ struct ContentView: View {
         }
     }
 
+    /// Open the Settings window and bring it above the MenuBarExtra panel.
+    private func openSettingsWindow() {
+        let before = Set(NSApp.windows.map { ObjectIdentifier($0) })
+        openSettings()
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
+            NSApp.activate(ignoringOtherApps: true)
+            // Find the newly created settings window, or fall back to any
+            // non-MenuBarExtra window that appeared.
+            let candidate = NSApp.windows.first { !before.contains(ObjectIdentifier($0)) }
+                ?? NSApp.windows.first { $0 != menuBarWindow && $0.isVisible && $0.canBecomeKey }
+            candidate?.orderFrontRegardless()
+        }
+    }
+
     /// Pin/unpin the MenuBarExtra window so it doesn't dismiss on focus loss.
     private func pinMenuBarWindow(_ pin: Bool) {
         guard let w = menuBarWindow else { return }
@@ -159,8 +184,7 @@ struct ContentView: View {
                 .accessibilityLabel("Open Live Transcript")
             }
             Button(action: {
-                NSApp.activate()
-                openSettings()
+                openSettingsWindow()
             }) {
                 Image(systemName: "gearshape")
             }

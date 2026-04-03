@@ -1,4 +1,5 @@
 import SwiftUI
+import TranscribeKit
 
 @main
 struct RipcordApp: App {
@@ -12,11 +13,36 @@ struct RipcordApp: App {
             let raw = UserDefaults.standard.string(forKey: SettingsKey.appearanceOverride) ?? "system"
             AppearanceMode.apply(AppearanceMode(rawValue: raw) ?? .system)
         }
-        Task { await mgr.startBufferingOnce() }
+        Task {
+            await mgr.startBufferingOnce()
+            // Prompt to download models on first launch
+            await MainActor.run { Self.promptForModelDownloadIfNeeded(manager: mgr) }
+        }
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
             object: nil, queue: .main
         ) { _ in mgr.shutdown() }
+    }
+
+    @MainActor
+    private static func promptForModelDownloadIfNeeded(manager: RecordingManager) {
+        let defaults = UserDefaults.standard
+        guard !defaults.bool(forKey: SettingsKey.modelDownloadPromptDismissed) else { return }
+        guard !TranscriptionService.modelsExistOnDisk(config: manager.transcriptionConfig) else { return }
+
+        let alert = NSAlert()
+        alert.messageText = "Download Transcription Models"
+        alert.informativeText = "Ripcord needs to download speech recognition models to enable transcription. This is a one-time download of about 150 MB."
+        alert.alertStyle = .informational
+        alert.addButton(withTitle: "Download")
+        alert.addButton(withTitle: "Later")
+
+        let response = alert.runModal()
+        defaults.set(true, forKey: SettingsKey.modelDownloadPromptDismissed)
+
+        if response == .alertFirstButtonReturn {
+            manager.downloadTranscriptionModels()
+        }
     }
 
     var body: some Scene {
