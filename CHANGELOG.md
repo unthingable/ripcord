@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.10.1
+
+- Prompt to download transcription models on first launch instead of requiring users to find the option in Settings.
+- Show model download button in the main panel when models aren't installed, so it's clear why transcription is unavailable.
+- Auto-enable transcription after downloading models for the first time.
+- Fix Settings window appearing behind the menubar panel.
+- Fix recent recordings not appearing on fresh install. The recordings directory wasn't created until the first recording, so the file listing and directory monitor both silently failed.
+- Show version number in Settings.
+- Add install/update script (`install.sh`) for unsigned builds.
+
 ## 0.10.0
 
 - **Live transcript** — real-time streaming transcription displayed in a dedicated window. Uses sliding-window ASR with tunable chunk size, lookahead, and confirmation threshold. Includes hypothesis (in-progress) word display that updates as speech is recognized.

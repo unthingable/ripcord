@@ -214,6 +214,13 @@ struct SettingsView: View {
         }
         .fixedSize(horizontal: false, vertical: true)
         .frame(width: 700)
+        .overlay(alignment: .bottomTrailing) {
+            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
+            Text("v\(version)")
+                .font(.caption2)
+                .foregroundStyle(.tertiary)
+                .padding(8)
+        }
     }
 
     @ViewBuilder

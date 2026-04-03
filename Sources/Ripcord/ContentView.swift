@@ -14,6 +14,7 @@ struct ContentView: View {
     @State private var fileTranscribeURL: URL?
     @State private var renamingURL: URL?
     @State private var renameText: String = ""
+    @State private var settingsCloseObserver: NSObjectProtocol?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -143,15 +144,25 @@ struct ContentView: View {
 
     /// Open the Settings window and bring it above the MenuBarExtra panel.
     private func openSettingsWindow() {
-        let before = Set(NSApp.windows.map { ObjectIdentifier($0) })
+        let panel = menuBarWindow
+        panel?.close()
         openSettings()
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.1) {
             NSApp.activate(ignoringOtherApps: true)
-            // Find the newly created settings window, or fall back to any
-            // non-MenuBarExtra window that appeared.
-            let candidate = NSApp.windows.first { !before.contains(ObjectIdentifier($0)) }
-                ?? NSApp.windows.first { $0 != menuBarWindow && $0.isVisible && $0.canBecomeKey }
-            candidate?.orderFrontRegardless()
+            if let settings = NSApp.windows.first(where: {
+                $0 != panel && $0.canBecomeKey && $0.isVisible
+            }) {
+                settingsCloseObserver = NotificationCenter.default.addObserver(
+                    forName: NSWindow.willCloseNotification, object: settings, queue: .main
+                ) { _ in
+                    if let obs = settingsCloseObserver {
+                        NotificationCenter.default.removeObserver(obs)
+                        settingsCloseObserver = nil
+                    }
+                    // Reopen the MenuBarExtra panel
+                    panel?.makeKeyAndOrderFront(nil)
+                }
+            }
         }
     }
 
