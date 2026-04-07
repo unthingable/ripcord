@@ -1,0 +1,320 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Ripcord — Cyan vs Teal in Light/Dark</title>
+<style>
+  * { margin: 0; padding: 0; box-sizing: border-box; }
+  body {
+    font-family: -apple-system, BlinkMacSystemFont, "SF Pro", system-ui, sans-serif;
+    background: #1a1a1a;
+    color: #e0e0e0;
+    padding: 40px;
+  }
+  h1 { font-size: 22px; font-weight: 600; margin-bottom: 8px; }
+  h2 { font-size: 16px; font-weight: 600; margin-bottom: 12px; }
+  h3 { font-size: 12px; font-weight: 600; margin-bottom: 8px; text-transform: uppercase; letter-spacing: 0.5px; }
+  .subtitle { color: #888; font-size: 14px; margin-bottom: 32px; }
+
+  .comparison { display: grid; grid-template-columns: 1fr 1fr; gap: 24px; margin-bottom: 48px; }
+  @media (max-width: 900px) { .comparison { grid-template-columns: 1fr; } }
+
+  .panel {
+    border-radius: 12px;
+    padding: 20px;
+    border: 1px solid;
+  }
+  .panel.dark {
+    background: #2a2a2a;
+    border-color: #3a3a3a;
+    color: #e0e0e0;
+  }
+  .panel.dark h3 { color: #888; }
+  .panel.light {
+    background: #f5f5f7;
+    border-color: #d2d2d7;
+    color: #1d1d1f;
+  }
+  .panel.light h3 { color: #86868b; }
+
+  .mode-label {
+    font-size: 11px; font-weight: 600; text-transform: uppercase;
+    letter-spacing: 1px; margin-bottom: 12px; opacity: 0.5;
+  }
+
+  .status-row { display: flex; gap: 12px; align-items: center; margin-bottom: 6px; }
+  .status-dot { width: 9px; height: 9px; border-radius: 50%; flex-shrink: 0; }
+  .status-label { font-size: 12px; opacity: 0.7; }
+
+  .meter-row { display: flex; align-items: center; gap: 8px; margin-bottom: 5px; }
+  .meter-label { font-size: 11px; opacity: 0.6; width: 48px; text-align: right; }
+  .meter-track { flex: 1; height: 5px; border-radius: 3px; overflow: hidden; }
+  .meter-track.dark { background: rgba(255,255,255,0.06); }
+  .meter-track.light { background: rgba(0,0,0,0.06); }
+  .meter-fill { height: 100%; border-radius: 3px; }
+
+  .channel-row { display: flex; gap: 5px; align-items: center; margin-bottom: 6px; }
+  .channel-circle { width: 13px; height: 13px; border-radius: 50%; border: 1.5px solid; }
+  .channel-label { font-size: 11px; opacity: 0.6; }
+
+  .transcript-line { margin-bottom: 6px; }
+  .speaker-name { font-size: 11px; font-weight: 600; margin-bottom: 1px; }
+  .transcript-text { font-size: 12px; line-height: 1.5; }
+  .transcript-text.dark { color: #ccc; }
+  .transcript-text.light { color: #444; }
+  .hyp { font-style: italic; opacity: 0.45; }
+  .ts { font-size: 10px; opacity: 0.4; margin-left: 4px; }
+
+  .section-title {
+    font-size: 18px; font-weight: 600; color: #fff;
+    margin-bottom: 16px; padding-bottom: 8px;
+    border-bottom: 1px solid #333;
+    display: flex; align-items: baseline; gap: 10px;
+  }
+  .tag { font-size: 11px; padding: 2px 7px; border-radius: 4px; background: #333; color: #888; font-weight: 500; }
+
+  .palette { display: flex; gap: 8px; margin-bottom: 16px; }
+  .sw { width: 32px; height: 32px; border-radius: 6px; border: 1px solid rgba(128,128,128,0.2); }
+
+  .note {
+    font-size: 11px; padding: 6px 10px; border-radius: 6px; margin-top: 8px;
+  }
+  .note.dark { background: rgba(255,255,255,0.04); color: #888; }
+  .note.light { background: rgba(0,0,0,0.04); color: #666; }
+  .warn { border-left: 3px solid #ff9f0a; }
+  .ok { border-left: 3px solid #32d74b; }
+</style>
+</head>
+<body>
+
+<h1>Rev 1 vs Rev 2 — Light & Dark</h1>
+<p class="subtitle">Testing cyan (#64d2ff) and teal (#2ac3de) legibility across both appearances</p>
+
+<!-- ============ REV 1: CYAN ============ -->
+<div class="section-title">Rev 1: Blue + Cyan <span class="tag">#3478f6 + #64d2ff</span></div>
+
+<div class="palette">
+  <div class="sw" style="background:#3478f6" title="Blue (system)"></div>
+  <div class="sw" style="background:#64d2ff" title="Cyan (mic)"></div>
+  <div class="sw" style="background:#32d74b" title="Green (ready)"></div>
+  <div class="sw" style="background:#bf5af2" title="Purple (live tx)"></div>
+  <div class="sw" style="background:#ff3b30" title="Red (recording)"></div>
+  <div class="sw" style="background:#ff9f0a" title="Orange (paused)"></div>
+  <div class="sw" style="background:#ff6b8a" title="Pink (error)"></div>
+</div>
+
+<div class="comparison">
+  <!-- Dark -->
+  <div class="panel dark">
+    <div class="mode-label">Dark mode</div>
+
+    <h3>Meters</h3>
+    <div class="meter-row"><span class="meter-label">System</span><div class="meter-track dark"><div class="meter-fill" style="width:65%;background:#3478f6"></div></div></div>
+    <div class="meter-row"><span class="meter-label">Mic</span><div class="meter-track dark"><div class="meter-fill" style="width:45%;background:#64d2ff"></div></div></div>
+
+    <h3 style="margin-top:12px">Channels</h3>
+    <div class="channel-row">
+      <div class="channel-circle" style="border-color:#3478f6; background:rgba(52,120,246,0.25)"></div>
+      <div class="channel-circle" style="border-color:#64d2ff; background:rgba(100,210,255,0.25)"></div>
+      <span class="channel-label">L: system  R: mic</span>
+    </div>
+
+    <h3 style="margin-top:12px">Transcript</h3>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#64d2ff">You <span class="ts">0:04</span></div>
+      <div class="transcript-text dark">The main thing we need to discuss <span class="hyp">is the timeline</span></div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#3478f6">Speaker 1 <span class="ts">0:12</span></div>
+      <div class="transcript-text dark">Right, I think we should push it back a week</div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#5a9af8">Speaker 2 <span class="ts">0:18</span></div>
+      <div class="transcript-text dark">Can we get an update on backend changes?</div>
+    </div>
+
+    <h3 style="margin-top:12px">Status</h3>
+    <div class="status-row"><div class="status-dot" style="background:#32d74b"></div><span class="status-label">Ready</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff3b30"></div><span class="status-label">Recording</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff9f0a"></div><span class="status-label">Paused</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff6b8a"></div><span class="status-label">Error</span></div>
+
+    <div class="note dark ok">Cyan reads well on dark backgrounds. Good separation from blue.</div>
+  </div>
+
+  <!-- Light -->
+  <div class="panel light">
+    <div class="mode-label">Light mode</div>
+
+    <h3>Meters</h3>
+    <div class="meter-row"><span class="meter-label">System</span><div class="meter-track light"><div class="meter-fill" style="width:65%;background:#3478f6"></div></div></div>
+    <div class="meter-row"><span class="meter-label">Mic</span><div class="meter-track light"><div class="meter-fill" style="width:45%;background:#64d2ff"></div></div></div>
+
+    <h3 style="margin-top:12px">Channels</h3>
+    <div class="channel-row">
+      <div class="channel-circle" style="border-color:#3478f6; background:rgba(52,120,246,0.15)"></div>
+      <div class="channel-circle" style="border-color:#64d2ff; background:rgba(100,210,255,0.15)"></div>
+      <span class="channel-label">L: system  R: mic</span>
+    </div>
+
+    <h3 style="margin-top:12px">Transcript</h3>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#64d2ff">You <span class="ts">0:04</span></div>
+      <div class="transcript-text light">The main thing we need to discuss <span class="hyp">is the timeline</span></div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#3478f6">Speaker 1 <span class="ts">0:12</span></div>
+      <div class="transcript-text light">Right, I think we should push it back a week</div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#5a9af8">Speaker 2 <span class="ts">0:18</span></div>
+      <div class="transcript-text light">Can we get an update on backend changes?</div>
+    </div>
+
+    <h3 style="margin-top:12px">Status</h3>
+    <div class="status-row"><div class="status-dot" style="background:#32d74b"></div><span class="status-label">Ready</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff3b30"></div><span class="status-label">Recording</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff9f0a"></div><span class="status-label">Paused</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff6b8a"></div><span class="status-label">Error</span></div>
+
+    <div class="note light warn">Cyan washes out on white — "You" label low contrast. Meter fill is faint.</div>
+  </div>
+</div>
+
+<!-- Cyan with darker light-mode variant -->
+<div class="section-title">Rev 1b: Cyan with adaptive shade <span class="tag">dark: #64d2ff → light: #00a0c0</span></div>
+
+<div class="comparison">
+  <div class="panel dark">
+    <div class="mode-label">Dark mode — #64d2ff (same)</div>
+    <div class="meter-row"><span class="meter-label">System</span><div class="meter-track dark"><div class="meter-fill" style="width:65%;background:#3478f6"></div></div></div>
+    <div class="meter-row"><span class="meter-label">Mic</span><div class="meter-track dark"><div class="meter-fill" style="width:45%;background:#64d2ff"></div></div></div>
+    <div class="transcript-line" style="margin-top:10px">
+      <div class="speaker-name" style="color:#64d2ff">You <span class="ts">0:04</span></div>
+      <div class="transcript-text dark">The main thing we need to discuss <span class="hyp">is the timeline</span></div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#3478f6">Speaker 1 <span class="ts">0:12</span></div>
+      <div class="transcript-text dark">Right, I think we should push it back</div>
+    </div>
+  </div>
+  <div class="panel light">
+    <div class="mode-label">Light mode — #00a0c0 (darker cyan)</div>
+    <div class="meter-row"><span class="meter-label">System</span><div class="meter-track light"><div class="meter-fill" style="width:65%;background:#3478f6"></div></div></div>
+    <div class="meter-row"><span class="meter-label">Mic</span><div class="meter-track light"><div class="meter-fill" style="width:45%;background:#00a0c0"></div></div></div>
+    <div class="transcript-line" style="margin-top:10px">
+      <div class="speaker-name" style="color:#00a0c0">You <span class="ts">0:04</span></div>
+      <div class="transcript-text light">The main thing we need to discuss <span class="hyp">is the timeline</span></div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#3478f6">Speaker 1 <span class="ts">0:12</span></div>
+      <div class="transcript-text light">Right, I think we should push it back</div>
+    </div>
+    <div class="note light ok">Darker shade in light mode preserves legibility. Maps to SwiftUI Color(.cyan) adaptive behavior.</div>
+  </div>
+</div>
+
+<!-- ============ REV 2: TEAL ============ -->
+<div class="section-title">Rev 2: Blue + Teal <span class="tag">#3478f6 + #2ac3de</span></div>
+
+<div class="palette">
+  <div class="sw" style="background:#3478f6" title="Blue (system)"></div>
+  <div class="sw" style="background:#2ac3de" title="Teal (mic)"></div>
+  <div class="sw" style="background:#32d74b" title="Green (ready)"></div>
+  <div class="sw" style="background:#bf5af2" title="Purple (live tx)"></div>
+  <div class="sw" style="background:#ff3b30" title="Red (recording)"></div>
+  <div class="sw" style="background:#ff9f0a" title="Orange (paused)"></div>
+  <div class="sw" style="background:#ff6b8a" title="Pink (error)"></div>
+</div>
+
+<div class="comparison">
+  <!-- Dark -->
+  <div class="panel dark">
+    <div class="mode-label">Dark mode</div>
+
+    <h3>Meters</h3>
+    <div class="meter-row"><span class="meter-label">System</span><div class="meter-track dark"><div class="meter-fill" style="width:65%;background:#3478f6"></div></div></div>
+    <div class="meter-row"><span class="meter-label">Mic</span><div class="meter-track dark"><div class="meter-fill" style="width:45%;background:#2ac3de"></div></div></div>
+
+    <h3 style="margin-top:12px">Channels</h3>
+    <div class="channel-row">
+      <div class="channel-circle" style="border-color:#3478f6; background:rgba(52,120,246,0.25)"></div>
+      <div class="channel-circle" style="border-color:#2ac3de; background:rgba(42,195,222,0.25)"></div>
+      <span class="channel-label">L: system  R: mic</span>
+    </div>
+
+    <h3 style="margin-top:12px">Transcript</h3>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#2ac3de">You <span class="ts">0:04</span></div>
+      <div class="transcript-text dark">The main thing we need to discuss <span class="hyp">is the timeline</span></div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#3478f6">Speaker 1 <span class="ts">0:12</span></div>
+      <div class="transcript-text dark">Right, I think we should push it back a week</div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#5a9af8">Speaker 2 <span class="ts">0:18</span></div>
+      <div class="transcript-text dark">Can we get an update on backend changes?</div>
+    </div>
+
+    <h3 style="margin-top:12px">Status</h3>
+    <div class="status-row"><div class="status-dot" style="background:#32d74b"></div><span class="status-label">Ready</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff3b30"></div><span class="status-label">Recording</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff9f0a"></div><span class="status-label">Paused</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff6b8a"></div><span class="status-label">Error</span></div>
+
+    <div class="note dark ok">Teal is slightly deeper than cyan — good dark mode contrast.</div>
+  </div>
+
+  <!-- Light -->
+  <div class="panel light">
+    <div class="mode-label">Light mode</div>
+
+    <h3>Meters</h3>
+    <div class="meter-row"><span class="meter-label">System</span><div class="meter-track light"><div class="meter-fill" style="width:65%;background:#3478f6"></div></div></div>
+    <div class="meter-row"><span class="meter-label">Mic</span><div class="meter-track light"><div class="meter-fill" style="width:45%;background:#2ac3de"></div></div></div>
+
+    <h3 style="margin-top:12px">Channels</h3>
+    <div class="channel-row">
+      <div class="channel-circle" style="border-color:#3478f6; background:rgba(52,120,246,0.15)"></div>
+      <div class="channel-circle" style="border-color:#2ac3de; background:rgba(42,195,222,0.15)"></div>
+      <span class="channel-label">L: system  R: mic</span>
+    </div>
+
+    <h3 style="margin-top:12px">Transcript</h3>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#2ac3de">You <span class="ts">0:04</span></div>
+      <div class="transcript-text light">The main thing we need to discuss <span class="hyp">is the timeline</span></div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#3478f6">Speaker 1 <span class="ts">0:12</span></div>
+      <div class="transcript-text light">Right, I think we should push it back a week</div>
+    </div>
+    <div class="transcript-line">
+      <div class="speaker-name" style="color:#5a9af8">Speaker 2 <span class="ts">0:18</span></div>
+      <div class="transcript-text light">Can we get an update on backend changes?</div>
+    </div>
+
+    <h3 style="margin-top:12px">Status</h3>
+    <div class="status-row"><div class="status-dot" style="background:#32d74b"></div><span class="status-label">Ready</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff3b30"></div><span class="status-label">Recording</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff9f0a"></div><span class="status-label">Paused</span></div>
+    <div class="status-row"><div class="status-dot" style="background:#ff6b8a"></div><span class="status-label">Error</span></div>
+
+    <div class="note light warn">Teal is better than cyan in light mode but still a bit light for text. Could use same adaptive approach.</div>
+  </div>
+</div>
+
+<!-- ============ VERDICT ============ -->
+<div style="margin-top:32px; padding:20px; background:#242424; border-radius:12px; border:1px solid #333;">
+  <h3 style="margin-bottom:12px; color:#aaa">Takeaway</h3>
+  <div style="font-size:13px; line-height:1.8; color:#ccc;">
+    <p>Both cyan and teal wash out a bit as <strong>text</strong> on light backgrounds. SwiftUI's built-in <code>.cyan</code> and <code>.teal</code> already handle this — they ship with adaptive dark/light variants that darken automatically.</p>
+    <p style="margin-top:8px">If using SwiftUI system colors (<code>Color.blue</code>, <code>Color.cyan</code>, <code>Color.teal</code>), this is free. Only matters if defining custom hex values.</p>
+    <p style="margin-top:12px"><strong>Rev 2 (teal)</strong> has slightly better light-mode legibility out of the box since it's already darker. <strong>Rev 1 (cyan)</strong> has more hue separation from blue but needs the adaptive shade in light mode.</p>
+  </div>
+</div>
+
+</body>
+</html>
