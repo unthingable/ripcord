@@ -74,27 +74,11 @@ final class MicrophoneCapture: @unchecked Sendable {
             return
         }
         _isRunning = true
+        currentDeviceID = deviceID
         stateLock.unlock()
 
-        currentDeviceID = deviceID
-
-        let effectiveDeviceID: AudioDeviceID
-        if let deviceID {
-            effectiveDeviceID = deviceID
-        } else if let defaultID = Self.currentDefaultInputDeviceID() {
-            effectiveDeviceID = defaultID
-        } else {
-            stateLock.lock()
-            _isRunning = false
-            stateLock.unlock()
-            throw DeviceError.formatNotReady
-        }
-
-        capturedCallback = onSamples
-
         do {
-            try setupAudioUnit(deviceID: effectiveDeviceID)
-            installDeviceListeners(deviceID: effectiveDeviceID)
+            try startCapture()
         } catch {
             stateLock.lock()
             _isRunning = false
@@ -103,12 +87,32 @@ final class MicrophoneCapture: @unchecked Sendable {
         }
     }
 
+    /// Core setup: resolve device, create audio unit, install listeners.
+    /// Caller is responsible for setting _isRunning and currentDeviceID
+    /// before calling this.
+    private func startCapture() throws {
+        stateLock.lock()
+        let deviceID = currentDeviceID
+        stateLock.unlock()
+
+        let effectiveDeviceID: AudioDeviceID
+        if let deviceID {
+            effectiveDeviceID = deviceID
+        } else if let defaultID = Self.currentDefaultInputDeviceID() {
+            effectiveDeviceID = defaultID
+        } else {
+            throw DeviceError.formatNotReady
+        }
+
+        capturedCallback = onSamples
+        try setupAudioUnit(deviceID: effectiveDeviceID)
+        installDeviceListeners(deviceID: effectiveDeviceID)
+    }
+
     func stop() {
+        stateLock.lock()
         restartWorkItem?.cancel()
         restartWorkItem = nil
-        removeDeviceListeners()
-
-        stateLock.lock()
         guard _isRunning else {
             stateLock.unlock()
             return
@@ -117,6 +121,12 @@ final class MicrophoneCapture: @unchecked Sendable {
         restartSuppressed = false
         stateLock.unlock()
 
+        // Fence: wait for any in-flight performDebouncedRestart on
+        // audioQueue to complete. It will observe _isRunning=false via
+        // its re-checks and bail, or finish setup so we can tear it down.
+        audioQueue.sync {}
+
+        removeDeviceListeners()
         tearDownAudioUnit()
     }
 
@@ -125,9 +135,9 @@ final class MicrophoneCapture: @unchecked Sendable {
     func suppressRestart() {
         stateLock.lock()
         restartSuppressed = true
-        stateLock.unlock()
         restartWorkItem?.cancel()
         restartWorkItem = nil
+        stateLock.unlock()
         logger.error("Mic restart suppressed (system capture coordinating)")
     }
 
@@ -210,34 +220,46 @@ final class MicrophoneCapture: @unchecked Sendable {
 
             try osCheck(AudioUnitInitialize(unit))
 
-            // Set audioUnit BEFORE starting so the IO callback can use it
-            // from the very first invocation (no race with the IO thread).
+            // Set audioUnit under lock (consistent with tearDownAudioUnit's
+            // locked read) BEFORE starting so the IO callback can use it
+            // from the very first invocation.
             renderErrorCount = 0
+            stateLock.lock()
             self.audioUnit = unit
+            stateLock.unlock()
             try osCheck(AudioOutputUnitStart(unit))
         } catch {
+            stateLock.lock()
             self.audioUnit = nil
+            stateLock.unlock()
             AudioComponentInstanceDispose(unit)
             throw error
         }
     }
 
     private func tearDownAudioUnit() {
-        // Atomically claim the unit and converter so that concurrent calls
-        // from stop() (main) and handleDeviceChange (audioQueue) don't
+        // Claim the audio unit atomically so concurrent teardown calls
+        // (stop on main, performDebouncedRestart on audioQueue) don't
         // double-dispose.
         stateLock.lock()
         let unit = audioUnit
         audioUnit = nil
-        let conv = converter
-        converter = nil
         stateLock.unlock()
 
         if let unit {
+            // AudioOutputUnitStop drains all in-flight IO callbacks before
+            // returning. After this, renderInput will never fire again for
+            // this unit, so it's safe to tear down the converter.
             AudioOutputUnitStop(unit)
             AudioUnitUninitialize(unit)
             AudioComponentInstanceDispose(unit)
         }
+
+        stateLock.lock()
+        let conv = converter
+        converter = nil
+        stateLock.unlock()
+
         if let conv {
             AudioConverterDispose(conv)
         }
@@ -398,8 +420,6 @@ final class MicrophoneCapture: @unchecked Sendable {
     // MARK: - Device Change Handling
 
     private func installDeviceListeners(deviceID: AudioDeviceID) {
-        listeningDeviceID = deviceID
-
         // Listen for device death (unplug)
         var aliveAddress = AudioObjectPropertyAddress(
             mSelector: kAudioDevicePropertyDeviceIsAlive,
@@ -409,11 +429,17 @@ final class MicrophoneCapture: @unchecked Sendable {
         let aliveBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
             self?.handleDeviceChange(reason: "device unplugged")
         }
+
+        stateLock.lock()
+        let pinned = currentDeviceID != nil
+        listeningDeviceID = deviceID
         deviceAliveListener = aliveBlock
+        stateLock.unlock()
+
         AudioObjectAddPropertyListenerBlock(deviceID, &aliveAddress, audioQueue, aliveBlock)
 
         // When using the system default, also listen for the default changing
-        if currentDeviceID == nil {
+        if !pinned {
             var defaultAddress = AudioObjectPropertyAddress(
                 mSelector: kAudioHardwarePropertyDefaultInputDevice,
                 mScope: kAudioObjectPropertyScopeGlobal,
@@ -422,7 +448,11 @@ final class MicrophoneCapture: @unchecked Sendable {
             let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
                 self?.handleDeviceChange(reason: "default input changed")
             }
+
+            stateLock.lock()
             defaultInputListener = defaultBlock
+            stateLock.unlock()
+
             AudioObjectAddPropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject), &defaultAddress, audioQueue, defaultBlock
             )
@@ -430,26 +460,32 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     private func removeDeviceListeners() {
-        if let block = deviceAliveListener {
+        stateLock.lock()
+        let aliveBlock = deviceAliveListener
+        deviceAliveListener = nil
+        let defaultBlock = defaultInputListener
+        defaultInputListener = nil
+        let devID = listeningDeviceID
+        stateLock.unlock()
+
+        if let aliveBlock {
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioDevicePropertyDeviceIsAlive,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain
             )
-            AudioObjectRemovePropertyListenerBlock(listeningDeviceID, &address, audioQueue, block)
-            deviceAliveListener = nil
+            AudioObjectRemovePropertyListenerBlock(devID, &address, audioQueue, aliveBlock)
         }
 
-        if let block = defaultInputListener {
+        if let defaultBlock {
             var address = AudioObjectPropertyAddress(
                 mSelector: kAudioHardwarePropertyDefaultInputDevice,
                 mScope: kAudioObjectPropertyScopeGlobal,
                 mElement: kAudioObjectPropertyElementMain
             )
             AudioObjectRemovePropertyListenerBlock(
-                AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
+                AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, defaultBlock
             )
-            defaultInputListener = nil
         }
     }
 
@@ -461,11 +497,13 @@ final class MicrophoneCapture: @unchecked Sendable {
         // don't churn coreaudiod with stop/start cycles that block other
         // apps' audio negotiation. Only after 2s of quiet do we do a
         // single clean teardown + restart.
-        restartWorkItem?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.performDebouncedRestart()
         }
+        stateLock.lock()
+        restartWorkItem?.cancel()
         restartWorkItem = work
+        stateLock.unlock()
         audioQueue.asyncAfter(deadline: .now() + 2.0, execute: work)
     }
 
@@ -473,31 +511,47 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     private func performDebouncedRestart(attempt: Int = 1) {
         stateLock.lock()
+        guard _isRunning else {
+            stateLock.unlock()
+            return
+        }
         if restartSuppressed {
             stateLock.unlock()
             logger.error("Mic restart suppressed, skipping independent restart")
             return
         }
+        let savedDeviceID = currentDeviceID
         stateLock.unlock()
 
+        // Keep _isRunning = true throughout the restart so stop() always
+        // sees us as running and performs a full teardown if called.
         removeDeviceListeners()
-
-        stateLock.lock()
-        let wasRunning = _isRunning
-        _isRunning = false
-        stateLock.unlock()
-
-        guard wasRunning else { return }
-
         tearDownAudioUnit()
 
+        // Re-check: stop() may have set _isRunning = false while we were
+        // tearing down. If so, don't create a new audio unit — stop() has
+        // already declared us stopped.
+        stateLock.lock()
+        guard _isRunning else {
+            stateLock.unlock()
+            return
+        }
+        stateLock.unlock()
+
         do {
-            try start(deviceID: currentDeviceID)
+            try startCapture()
             logger.error("Mic restarted successfully (attempt \(attempt))")
         } catch {
-            if currentDeviceID != nil {
+            if savedDeviceID != nil {
+                stateLock.lock()
+                guard _isRunning else {
+                    stateLock.unlock()
+                    return
+                }
+                currentDeviceID = nil
+                stateLock.unlock()
                 do {
-                    try start(deviceID: nil)
+                    try startCapture()
                     logger.error("Mic restarted on system default (attempt \(attempt))")
                     return
                 } catch {}
@@ -507,9 +561,18 @@ final class MicrophoneCapture: @unchecked Sendable {
                 let work = DispatchWorkItem { [weak self] in
                     self?.performDebouncedRestart(attempt: attempt + 1)
                 }
+                stateLock.lock()
+                guard _isRunning else {
+                    stateLock.unlock()
+                    return
+                }
                 restartWorkItem = work
+                stateLock.unlock()
                 audioQueue.asyncAfter(deadline: .now() + 2.0, execute: work)
             } else {
+                stateLock.lock()
+                _isRunning = false
+                stateLock.unlock()
                 logger.error("Mic restart failed after \(attempt) attempts: \(error.localizedDescription)")
             }
         }
