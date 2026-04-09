@@ -287,14 +287,15 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
         // Feed system audio to active + pending managers
         if !sysSamples.isEmpty {
-            if systemFirstSampleDate == nil { systemFirstSampleDate = Date() }
+            // Record first-sample date under updateLock — handleUpdate reads it under the same lock
+            updateLock.withLock { if systemFirstSampleDate == nil { systemFirstSampleDate = Date() } }
             if let mgr = sysMgr { Self.feedManager(mgr, samples: sysSamples) }
             if let mgr = pendingSys { Self.feedManager(mgr, samples: sysSamples) }
         }
 
         // Feed mic audio to active + pending managers
         if !micSamples.isEmpty {
-            if micFirstSampleDate == nil { micFirstSampleDate = Date() }
+            updateLock.withLock { if micFirstSampleDate == nil { micFirstSampleDate = Date() } }
             if let mgr = micMgr { Self.feedManager(mgr, samples: micSamples) }
             if let mgr = pendingMic { Self.feedManager(mgr, samples: micSamples) }
         }
@@ -423,6 +424,9 @@ final class LiveTranscriptStream: @unchecked Sendable {
         let escaped = trimmed
             .replacingOccurrences(of: "\\", with: "\\\\")
             .replacingOccurrences(of: "\"", with: "\\\"")
+            .replacingOccurrences(of: "\n", with: "\\n")
+            .replacingOccurrences(of: "\r", with: "\\r")
+            .replacingOccurrences(of: "\t", with: "\\t")
         var line = """
             {"t":\(String(format: "%.2f", start)),"end":\(String(format: "%.2f", end)),\
             "word":"\(escaped)","src":"\(source)","conf":\(String(format: "%.2f", confEnd))

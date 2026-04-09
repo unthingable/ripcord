@@ -50,16 +50,12 @@ final class CircularAudioBuffer: @unchecked Sendable {
     }
 
     var sampleCount: Int {
-        lock.lock()
-        defer { lock.unlock() }
-        return min(totalWritten, capacity)
+        lock.withLock { min(totalWritten, capacity) }
     }
 
     /// Sets the state that new bars will be tagged with.
     func setBarState(_ state: BarState) {
-        lock.lock()
-        currentBarState = state
-        lock.unlock()
+        lock.withLock { currentBarState = state }
     }
 
     func write(_ samples: [Float]) {
@@ -144,11 +140,11 @@ final class CircularAudioBuffer: @unchecked Sendable {
 
     /// Reads and resets the peak accumulated since last call.
     func consumeMeterPeak() -> Float {
-        lock.lock()
-        defer { lock.unlock() }
-        let p = meterPeakAccum
-        meterPeakAccum = 0
-        return p
+        lock.withLock {
+            let p = meterPeakAccum
+            meterPeakAccum = 0
+            return p
+        }
     }
 
     /// Returns the 100 most recent waveform bar peaks and their states.

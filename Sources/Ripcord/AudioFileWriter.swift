@@ -37,6 +37,7 @@ enum AudioQuality: String, CaseIterable, Identifiable {
 
     func label(for format: AudioOutputFormat) -> String {
         let kbps = bitRate(for: format) / 1000
+        guard kbps > 0 else { return rawValue }
         return "\(rawValue) (\(kbps) kbps)"
     }
 }

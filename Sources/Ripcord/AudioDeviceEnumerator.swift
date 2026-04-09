@@ -96,7 +96,7 @@ final class AudioDeviceEnumerator {
         var prop: Unmanaged<CFString>?
         var dataSize = UInt32(MemoryLayout<Unmanaged<CFString>?>.size)
         let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &prop)
-        guard status == noErr, let cf = prop?.takeUnretainedValue() else { return nil }
+        guard status == noErr, let cf = prop?.takeRetainedValue() else { return nil }
         return cf as String
     }
 

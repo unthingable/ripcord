@@ -53,14 +53,12 @@ final class MicrophoneCapture: @unchecked Sendable {
     private var capturedCallback: (([Float]) -> Void)?
 
     // Diagnostic: track render errors from the IO thread
-    private var renderErrorCount: Int = 0
+    private var renderErrorCount = 0
 
     var onSamples: (([Float]) -> Void)?
 
     var isRunning: Bool {
-        stateLock.lock()
-        defer { stateLock.unlock() }
-        return _isRunning
+        stateLock.withLock { _isRunning }
     }
 
     deinit {
@@ -68,21 +66,18 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func start(deviceID: AudioDeviceID? = nil) throws {
-        stateLock.lock()
-        guard !_isRunning else {
-            stateLock.unlock()
-            return
+        let alreadyRunning = stateLock.withLock {
+            guard !_isRunning else { return true }
+            _isRunning = true
+            currentDeviceID = deviceID
+            return false
         }
-        _isRunning = true
-        currentDeviceID = deviceID
-        stateLock.unlock()
+        guard !alreadyRunning else { return }
 
         do {
             try startCapture()
         } catch {
-            stateLock.lock()
-            _isRunning = false
-            stateLock.unlock()
+            stateLock.withLock { _isRunning = false }
             throw error
         }
     }
@@ -91,9 +86,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Caller is responsible for setting _isRunning and currentDeviceID
     /// before calling this.
     private func startCapture() throws {
-        stateLock.lock()
-        let deviceID = currentDeviceID
-        stateLock.unlock()
+        let deviceID = stateLock.withLock { currentDeviceID }
 
         let effectiveDeviceID: AudioDeviceID
         if let deviceID {
@@ -110,16 +103,15 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func stop() {
-        stateLock.lock()
-        restartWorkItem?.cancel()
-        restartWorkItem = nil
-        guard _isRunning else {
-            stateLock.unlock()
-            return
+        let wasRunning = stateLock.withLock {
+            restartWorkItem?.cancel()
+            restartWorkItem = nil
+            guard _isRunning else { return false }
+            _isRunning = false
+            restartSuppressed = false
+            return true
         }
-        _isRunning = false
-        restartSuppressed = false
-        stateLock.unlock()
+        guard wasRunning else { return }
 
         // Fence: wait for any in-flight performDebouncedRestart on
         // audioQueue to complete. It will observe _isRunning=false via
@@ -133,18 +125,16 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Suppress independent restarts. Called when SystemAudioCapture detects
     /// a route change and will handle the mic restart via the coordinated cycle.
     func suppressRestart() {
-        stateLock.lock()
-        restartSuppressed = true
-        restartWorkItem?.cancel()
-        restartWorkItem = nil
-        stateLock.unlock()
+        stateLock.withLock {
+            restartSuppressed = true
+            restartWorkItem?.cancel()
+            restartWorkItem = nil
+        }
         logger.error("Mic restart suppressed (system capture coordinating)")
     }
 
     func unsuppressRestart() {
-        stateLock.lock()
-        restartSuppressed = false
-        stateLock.unlock()
+        stateLock.withLock { restartSuppressed = false }
     }
 
     // MARK: - Audio Unit Setup
@@ -224,14 +214,21 @@ final class MicrophoneCapture: @unchecked Sendable {
             // locked read) BEFORE starting so the IO callback can use it
             // from the very first invocation.
             renderErrorCount = 0
-            stateLock.lock()
-            self.audioUnit = unit
-            stateLock.unlock()
+            stateLock.withLock { self.audioUnit = unit }
             try osCheck(AudioOutputUnitStart(unit))
         } catch {
-            stateLock.lock()
-            self.audioUnit = nil
-            stateLock.unlock()
+            let initializedUnit = stateLock.withLock { () -> AudioComponentInstance? in
+                let u = self.audioUnit   // non-nil only if AudioUnitInitialize succeeded
+                self.audioUnit = nil
+                if let conv = self.converter {
+                    AudioConverterDispose(conv)
+                    self.converter = nil
+                }
+                return u
+            }
+            if initializedUnit != nil {
+                AudioUnitUninitialize(unit)
+            }
             AudioComponentInstanceDispose(unit)
             throw error
         }
@@ -241,11 +238,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         // Claim the audio unit atomically so concurrent teardown calls
         // (stop on main, performDebouncedRestart on audioQueue) don't
         // double-dispose.
-        stateLock.lock()
-        let unit = audioUnit
-        audioUnit = nil
-        stateLock.unlock()
-
+        let unit = stateLock.withLock { defer { audioUnit = nil }; return audioUnit }
         if let unit {
             // AudioOutputUnitStop drains all in-flight IO callbacks before
             // returning. After this, renderInput will never fire again for
@@ -255,11 +248,7 @@ final class MicrophoneCapture: @unchecked Sendable {
             AudioComponentInstanceDispose(unit)
         }
 
-        stateLock.lock()
-        let conv = converter
-        converter = nil
-        stateLock.unlock()
-
+        let conv = stateLock.withLock { defer { converter = nil }; return converter }
         if let conv {
             AudioConverterDispose(conv)
         }
@@ -277,6 +266,7 @@ final class MicrophoneCapture: @unchecked Sendable {
 
         let count = Int(frameCount)
         if renderBuffer.count < count {
+            logger.error("renderBuffer too small (\(self.renderBuffer.count) < \(count)) — reallocating on IO thread")
             renderBuffer = [Float](repeating: 0, count: count)
         }
 
@@ -349,13 +339,13 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Resample from renderBuffer (frameCount samples at deviceSampleRate)
     /// to 48 kHz.  Reads renderBuffer directly to avoid intermediate copies.
     private func resample(frameCount: Int) -> [Float]? {
-        guard let converter else { return nil }
-        guard deviceSampleRate > 0 else { return nil }
+        guard let converter, deviceSampleRate > 0 else { return nil }
 
         let ratio = AudioConstants.sampleRate / deviceSampleRate
         let outputFrameCount = Int(Double(frameCount) * ratio) + 1
 
         if resampleOutputBuffer.count < outputFrameCount {
+            logger.error("resampleOutputBuffer too small (\(self.resampleOutputBuffer.count) < \(outputFrameCount)) — reallocating on IO thread")
             resampleOutputBuffer = [Float](repeating: 0, count: outputFrameCount)
         }
 
@@ -387,13 +377,13 @@ final class MicrophoneCapture: @unchecked Sendable {
                     { (_, ioNumberDataPackets, ioData, _, inUserData) -> OSStatus in
                         guard let userData = inUserData else {
                             ioNumberDataPackets.pointee = 0
-                            return 1  // kNoMoreData
+                            return MicrophoneCapture.kNoMoreData
                         }
                         let srcBufList = userData.assumingMemoryBound(to: AudioBufferList.self)
                         let available = srcBufList.pointee.mBuffers.mDataByteSize
                         if available == 0 {
                             ioNumberDataPackets.pointee = 0
-                            return 1  // kNoMoreData
+                            return MicrophoneCapture.kNoMoreData
                         }
                         ioData.pointee.mBuffers.mData = srcBufList.pointee.mBuffers.mData
                         ioData.pointee.mBuffers.mDataByteSize = available
@@ -430,11 +420,11 @@ final class MicrophoneCapture: @unchecked Sendable {
             self?.handleDeviceChange(reason: "device unplugged")
         }
 
-        stateLock.lock()
-        let pinned = currentDeviceID != nil
-        listeningDeviceID = deviceID
-        deviceAliveListener = aliveBlock
-        stateLock.unlock()
+        let pinned = stateLock.withLock {
+            listeningDeviceID = deviceID
+            deviceAliveListener = aliveBlock
+            return currentDeviceID != nil
+        }
 
         AudioObjectAddPropertyListenerBlock(deviceID, &aliveAddress, audioQueue, aliveBlock)
 
@@ -449,9 +439,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 self?.handleDeviceChange(reason: "default input changed")
             }
 
-            stateLock.lock()
-            defaultInputListener = defaultBlock
-            stateLock.unlock()
+            stateLock.withLock { defaultInputListener = defaultBlock }
 
             AudioObjectAddPropertyListenerBlock(
                 AudioObjectID(kAudioObjectSystemObject), &defaultAddress, audioQueue, defaultBlock
@@ -460,13 +448,13 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     private func removeDeviceListeners() {
-        stateLock.lock()
-        let aliveBlock = deviceAliveListener
-        deviceAliveListener = nil
-        let defaultBlock = defaultInputListener
-        defaultInputListener = nil
-        let devID = listeningDeviceID
-        stateLock.unlock()
+        let (aliveBlock, defaultBlock, devID) = stateLock.withLock {
+            defer {
+                deviceAliveListener = nil
+                defaultInputListener = nil
+            }
+            return (deviceAliveListener, defaultInputListener, listeningDeviceID)
+        }
 
         if let aliveBlock {
             var address = AudioObjectPropertyAddress(
@@ -500,28 +488,24 @@ final class MicrophoneCapture: @unchecked Sendable {
         let work = DispatchWorkItem { [weak self] in
             self?.performDebouncedRestart()
         }
-        stateLock.lock()
-        restartWorkItem?.cancel()
-        restartWorkItem = work
-        stateLock.unlock()
+        stateLock.withLock {
+            restartWorkItem?.cancel()
+            restartWorkItem = work
+        }
         audioQueue.asyncAfter(deadline: .now() + 2.0, execute: work)
     }
 
     private static let maxRestartAttempts = 5
 
     private func performDebouncedRestart(attempt: Int = 1) {
-        stateLock.lock()
-        guard _isRunning else {
-            stateLock.unlock()
-            return
+        let (isRunning, suppressed, savedDeviceID) = stateLock.withLock {
+            (_isRunning, restartSuppressed, currentDeviceID)
         }
-        if restartSuppressed {
-            stateLock.unlock()
+        guard isRunning else { return }
+        if suppressed {
             logger.error("Mic restart suppressed, skipping independent restart")
             return
         }
-        let savedDeviceID = currentDeviceID
-        stateLock.unlock()
 
         // Keep _isRunning = true throughout the restart so stop() always
         // sees us as running and performs a full teardown if called.
@@ -531,48 +515,41 @@ final class MicrophoneCapture: @unchecked Sendable {
         // Re-check: stop() may have set _isRunning = false while we were
         // tearing down. If so, don't create a new audio unit — stop() has
         // already declared us stopped.
-        stateLock.lock()
-        guard _isRunning else {
-            stateLock.unlock()
-            return
-        }
-        stateLock.unlock()
+        guard stateLock.withLock({ _isRunning }) else { return }
 
         do {
             try startCapture()
             logger.error("Mic restarted successfully (attempt \(attempt))")
         } catch {
             if savedDeviceID != nil {
-                stateLock.lock()
-                guard _isRunning else {
-                    stateLock.unlock()
-                    return
+                let stillRunning = stateLock.withLock {
+                    guard _isRunning else { return false }
+                    currentDeviceID = nil
+                    return true
                 }
-                currentDeviceID = nil
-                stateLock.unlock()
+                guard stillRunning else { return }
                 do {
                     try startCapture()
                     logger.error("Mic restarted on system default (attempt \(attempt))")
                     return
-                } catch {}
+                } catch {
+                    logger.error("Mic restart on system default also failed (attempt \(attempt)): \(error.localizedDescription)")
+                }
             }
             if attempt < Self.maxRestartAttempts {
                 logger.error("Mic not ready (attempt \(attempt)), retrying in 2s")
                 let work = DispatchWorkItem { [weak self] in
                     self?.performDebouncedRestart(attempt: attempt + 1)
                 }
-                stateLock.lock()
-                guard _isRunning else {
-                    stateLock.unlock()
-                    return
+                let stillRunning = stateLock.withLock {
+                    guard _isRunning else { return false }
+                    restartWorkItem = work
+                    return true
                 }
-                restartWorkItem = work
-                stateLock.unlock()
+                guard stillRunning else { return }
                 audioQueue.asyncAfter(deadline: .now() + 2.0, execute: work)
             } else {
-                stateLock.lock()
-                _isRunning = false
-                stateLock.unlock()
+                stateLock.withLock { _isRunning = false }
                 logger.error("Mic restart failed after \(attempt) attempts: \(error.localizedDescription)")
             }
         }

@@ -44,11 +44,7 @@ final class SpeakerProfileStore {
         let count = Float(profiles[idx].observationCount)
         guard old.count == newEmbedding.count else { return }
 
-        var averaged = [Float](repeating: 0, count: old.count)
-        for i in 0..<old.count {
-            averaged[i] = (old[i] * count + newEmbedding[i]) / (count + 1)
-        }
-
+        let averaged = zip(old, newEmbedding).map { (o, n) in (o * count + n) / (count + 1) }
         profiles[idx].embedding = SpeakerMatcher.l2Normalize(averaged)
         profiles[idx].observationCount += 1
         save()

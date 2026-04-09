@@ -18,19 +18,20 @@ public enum SpeakerMatcher {
     /// Cosine similarity between two L2-normalized embeddings (= dot product).
     public static func cosineSimilarity(_ a: [Float], _ b: [Float]) -> Float {
         guard a.count == b.count, !a.isEmpty else { return 0 }
-        var dot: Float = 0
-        for i in 0..<a.count {
-            dot += a[i] * b[i]
-        }
-        return dot
+        return zip(a, b).reduce(into: Float(0)) { $0 += $1.0 * $1.1 }
     }
 
     /// Match new speaker embeddings against stored profiles using greedy best-match.
     /// Each new speaker and each profile matches at most once.
+    ///
+    /// A match is only accepted when the best candidate for a rawID exceeds the
+    /// runner-up by at least `margin`.  This prevents confident-but-wrong
+    /// identifications when multiple stored profiles score above `threshold`.
     public static func match(
         embeddings: [String: [Float]],
         profiles: [SpeakerProfile],
-        threshold: Float = 0.75
+        threshold: Float = 0.75,
+        margin: Float = 0.1
     ) -> SpeakerMatchResult {
         guard !embeddings.isEmpty, !profiles.isEmpty else {
             return SpeakerMatchResult(matched: [:], unmatched: embeddings)
@@ -47,14 +48,27 @@ public enum SpeakerMatcher {
             }
         }
 
+        // For each rawID, reject if the best and second-best profiles are
+        // too close — the match is ambiguous and likely wrong.
+        var ambiguousRawIDs: Set<String> = []
+        let grouped = Dictionary(grouping: candidates, by: { $0.rawID })
+        for (rawID, group) in grouped {
+            let sorted = group.sorted { $0.similarity > $1.similarity }
+            if sorted.count >= 2, sorted[0].similarity - sorted[1].similarity < margin {
+                ambiguousRawIDs.insert(rawID)
+            }
+        }
+
         // Sort descending by similarity for greedy assignment
-        candidates.sort { $0.similarity > $1.similarity }
+        let sortedCandidates = candidates
+            .filter { !ambiguousRawIDs.contains($0.rawID) }
+            .sorted { $0.similarity > $1.similarity }
 
         var matched: [String: SpeakerProfile] = [:]
         var usedRawIDs: Set<String> = []
         var usedProfileIDs: Set<UUID> = []
 
-        for candidate in candidates {
+        for candidate in sortedCandidates {
             guard !usedRawIDs.contains(candidate.rawID),
                   !usedProfileIDs.contains(candidate.profile.id) else { continue }
             matched[candidate.rawID] = candidate.profile

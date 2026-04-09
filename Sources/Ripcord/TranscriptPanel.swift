@@ -78,7 +78,6 @@ private struct TurnView: View {
         let phrases = turn.phrases
         guard !phrases.isEmpty else { return Text("") }
         var result = Text("")
-        var wordIndex = 0
         for (pi, phrase) in phrases.enumerated() {
             // Insert extra space between phrases (visual sentence break)
             if pi > 0 { result = result + Text("  ") }
@@ -93,7 +92,6 @@ private struct TurnView: View {
                     result = result + Text(word.word)
                         .foregroundColor(isConfirmed ? nil : .secondary)
                 }
-                wordIndex += 1
             }
         }
         return result

@@ -32,15 +32,17 @@ macOS menubar app for retroactive audio recording with transcription.
 
 ## Install
 
-Download the latest `Ripcord.app` from [Releases](../../releases) and move it to your Applications folder.
-
-**Note:** The app is unsigned. On first launch, macOS will show a warning that it's from an unidentified developer. To bypass this:
-
 ```bash
-xattr -cr /path/to/Ripcord.app
+curl -fsSL https://raw.githubusercontent.com/unthingable/ripcord/main/install.sh | bash
 ```
 
-Or right-click the app, select "Open", then click "Open" in the dialog.
+This downloads the latest release, installs to `/Applications`, and clears the quarantine attribute.
+
+Or download `Ripcord.app` manually from [Releases](../../releases) and move it to your Applications folder. The app is unsigned, so you'll need to clear quarantine:
+
+```bash
+xattr -cr /Applications/Ripcord.app
+```
 
 ### Requirements
 

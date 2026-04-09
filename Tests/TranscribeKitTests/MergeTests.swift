@@ -104,14 +104,14 @@ test("Clear speaker change overrides continuity bias") {
 }
 
 test("Continuity bias only applies when previous speaker has overlap") {
-    // Word at 6.0-7.0s: only B has overlap. Even though previousSpeaker is A,
-    // A has no overlap so bias doesn't apply.
+    // Word at 5.5-6.0s: only B (5-10) overlaps. A ended at 5.0 — no overlap.
+    // Even though previousSpeaker is A, the bias requires A to have overlap to apply.
     let segments = [
         makeSeg(speaker: "A", start: 0, end: 5),
         makeSeg(speaker: "B", start: 5, end: 10),
     ]
     let result = findSpeakerByOverlap(
-        wordStart: 6.0, wordEnd: 7.0, in: segments, previousSpeaker: "A")
+        wordStart: 5.5, wordEnd: 6.0, in: segments, previousSpeaker: "A")
     assertEqual(result, "B", "bias should not apply when previous speaker has no overlap")
 }
 
@@ -178,6 +178,10 @@ test("Word cap limits reassignment") {
     snapTransitionsToPauses(&words)
     // No pause found within 3 words, so nothing should be reassigned
     assertEqual(words[1].speaker, "B", "no snap when no pause found within cap")
+    assertEqual(words[2].speaker, "B", "c should stay B")
+    assertEqual(words[3].speaker, "B", "d should stay B")
+    assertEqual(words[4].speaker, "B", "e should stay B")
+    assertEqual(words[5].speaker, "B", "f should stay B")
 }
 
 test("Multiple words snapped before pause") {
@@ -828,6 +832,55 @@ test("Threshold filters low-similarity matches") {
     let result = SpeakerMatcher.match(embeddings: ["S0": embB], profiles: profiles)
     assert(result.matched.isEmpty, "below-threshold similarity should not match")
     assertEqual(result.unmatched.count, 1, "should be unmatched")
+}
+
+test("Ambiguous match rejected when margin too small") {
+    // Two profiles that are both similar to the new embedding —
+    // the best match doesn't beat the runner-up by enough margin.
+    let emb = SpeakerMatcher.l2Normalize([1.0, 0.2, 0.1, 0, 0, 0, 0, 0])
+    let profileA = SpeakerProfile(name: "Alice",
+        embedding: SpeakerMatcher.l2Normalize([1.0, 0.15, 0.1, 0, 0, 0, 0, 0]))
+    let profileB = SpeakerProfile(name: "Kirill",
+        embedding: SpeakerMatcher.l2Normalize([1.0, 0.25, 0.1, 0, 0, 0, 0, 0]))
+
+    let simA = SpeakerMatcher.cosineSimilarity(emb, profileA.embedding)
+    let simB = SpeakerMatcher.cosineSimilarity(emb, profileB.embedding)
+    // Both above threshold, gap is small
+    assert(simA >= 0.75 && simB >= 0.75,
+        "both should be above threshold: \(simA), \(simB)")
+    assert(abs(simA - simB) < 0.1,
+        "gap should be < margin: \(abs(simA - simB))")
+
+    let result = SpeakerMatcher.match(
+        embeddings: ["S0": emb], profiles: [profileA, profileB])
+    assert(result.matched.isEmpty,
+        "ambiguous match should be rejected, got: \(result.matched.values.map(\.name))")
+    assertEqual(result.unmatched.count, 1, "should fall to unmatched")
+}
+
+test("Clear winner still matches when margin is satisfied") {
+    let embA = makeEmbedding(dim: 0)
+    let profileAlice = SpeakerProfile(name: "Alice", embedding: perturbEmbedding(embA, noise: 0.02))
+    let profileBob = SpeakerProfile(name: "Bob", embedding: makeEmbedding(dim: 1))
+
+    let simAlice = SpeakerMatcher.cosineSimilarity(embA, profileAlice.embedding)
+    let simBob = SpeakerMatcher.cosineSimilarity(embA, profileBob.embedding)
+    assert(simAlice - simBob > 0.1,
+        "Alice should clearly win: \(simAlice) vs \(simBob)")
+
+    let result = SpeakerMatcher.match(
+        embeddings: ["S0": embA], profiles: [profileAlice, profileBob])
+    assertEqual(result.matched["S0"]?.name, "Alice", "clear winner should match")
+    assert(result.unmatched.isEmpty, "no unmatched expected")
+}
+
+test("Single profile above threshold always matches (no margin needed)") {
+    let emb = makeEmbedding(dim: 0)
+    let profile = SpeakerProfile(name: "Alice", embedding: perturbEmbedding(emb, noise: 0.05))
+    let result = SpeakerMatcher.match(
+        embeddings: ["S0": emb], profiles: [profile])
+    assertEqual(result.matched["S0"]?.name, "Alice",
+        "single candidate needs no margin")
 }
 
 // MARK: - Summary

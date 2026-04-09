@@ -1274,8 +1274,6 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
-
-
     // MARK: - Private
 
     // Audio always flows to circular buffers (continuous waveform); also to pending when recording.

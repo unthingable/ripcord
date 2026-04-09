@@ -24,6 +24,11 @@ bundle: build
 	cp $(BIN_PATH)/$(APP_NAME) $(BUNDLE)/Contents/MacOS/$(APP_NAME)
 	cp $(BIN_PATH)/transcribe $(BUNDLE)/Contents/MacOS/transcribe
 	cp Info.plist $(BUNDLE)/Contents/Info.plist
+	@if ! git describe --exact-match --tags HEAD >/dev/null 2>&1; then \
+		HASH=$$(git rev-parse --short HEAD); \
+		VER=$$(/usr/libexec/PlistBuddy -c "Print :CFBundleShortVersionString" $(BUNDLE)/Contents/Info.plist); \
+		/usr/libexec/PlistBuddy -c "Set :CFBundleShortVersionString $${VER}-$${HASH}" $(BUNDLE)/Contents/Info.plist; \
+	fi
 	@if codesign --force --sign "Ripcord Development" --entitlements Ripcord.entitlements $(BUNDLE) 2>/dev/null; then \
 		echo "Signed with 'Ripcord Development' identity"; \
 	else \

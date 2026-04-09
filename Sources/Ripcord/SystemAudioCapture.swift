@@ -365,13 +365,13 @@ final class SystemAudioCapture: @unchecked Sendable {
                     { (_, ioNumberDataPackets, ioData, _, inUserData) -> OSStatus in
                         guard let userData = inUserData else {
                             ioNumberDataPackets.pointee = 0
-                            return 1  // kNoMoreData
+                            return SystemAudioCapture.kNoMoreData
                         }
                         let srcBufList = userData.assumingMemoryBound(to: AudioBufferList.self)
                         let available = srcBufList.pointee.mBuffers.mDataByteSize
                         if available == 0 {
                             ioNumberDataPackets.pointee = 0
-                            return 1  // kNoMoreData
+                            return SystemAudioCapture.kNoMoreData
                         }
                         ioData.pointee.mBuffers.mData = srcBufList.pointee.mBuffers.mData
                         ioData.pointee.mBuffers.mDataByteSize = available

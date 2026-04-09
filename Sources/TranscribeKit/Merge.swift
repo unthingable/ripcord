@@ -212,27 +212,20 @@ public func absorbNilSpeakers(_ words: inout [SpeakerWord]) {
         var bestSpeaker: String?
         var bestDistance = Double.infinity
 
-        // Look backward
-        for j in stride(from: i - 1, through: 0, by: -1) {
-            if let sp = words[j].speaker {
-                let dist = words[i].word.startTime - words[j].word.endTime
-                if dist < bestDistance {
-                    bestDistance = dist
-                    bestSpeaker = sp
-                }
-                break
+        // Nearest predecessor with a speaker
+        if let j = words[..<i].indices.last(where: { words[$0].speaker != nil }) {
+            let dist = words[i].word.startTime - words[j].word.endTime
+            if dist < bestDistance {
+                bestDistance = dist
+                bestSpeaker = words[j].speaker
             }
         }
 
-        // Look forward
-        for j in (i + 1)..<words.count {
-            if let sp = words[j].speaker {
-                let dist = words[j].word.startTime - words[i].word.endTime
-                if dist < bestDistance {
-                    bestDistance = dist
-                    bestSpeaker = sp
-                }
-                break
+        // Nearest successor with a speaker
+        if let j = words[(i + 1)...].indices.first(where: { words[$0].speaker != nil }) {
+            let dist = words[j].word.startTime - words[i].word.endTime
+            if dist < bestDistance {
+                bestSpeaker = words[j].speaker
             }
         }
 

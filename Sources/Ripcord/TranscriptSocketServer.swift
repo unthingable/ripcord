@@ -46,6 +46,9 @@ final class TranscriptSocketServer: @unchecked Sendable {
     // MARK: - Lifecycle
 
     func start() throws {
+        // Ignore SIGPIPE process-wide so broken client connections don't kill the app
+        signal(SIGPIPE, SIG_IGN)
+
         // Remove stale socket file
         unlink(socketPath)
 
@@ -266,9 +269,6 @@ final class TranscriptSocketServer: @unchecked Sendable {
             let flags = fcntl(clientFD, F_GETFL)
             _ = fcntl(clientFD, F_SETFL, flags | O_NONBLOCK)
 
-            // Ignore SIGPIPE for this process (if not already)
-            signal(SIGPIPE, SIG_IGN)
-
             clientLock.withLock {
                 // Send replay buffer to new client
                 let replayLines = replayLines()
@@ -310,18 +310,8 @@ final class TranscriptSocketServer: @unchecked Sendable {
         message.withCString { ptr in
             let len = strlen(ptr)
             let written = write(fd, ptr, len)
-            if written < 0 {
-                let err = errno
-                if err == EAGAIN || err == EWOULDBLOCK {
-                    // Client can't keep up — drop it
-                    return false
-                }
-                if err == EPIPE || err == ECONNRESET || err == ENOTCONN {
-                    return false
-                }
-                return false
-            }
-            return true
+            // Drop client on any write error (EAGAIN = can't keep up, EPIPE/ECONNRESET = gone)
+            return written >= 0
         }
     }
 
