@@ -30,6 +30,7 @@ enum AppearanceMode: String, CaseIterable {
 
 struct SettingsView: View {
     @Bindable var manager: RecordingManager
+    var updateChecker: UpdateChecker
 
     @State private var launchAtLogin = SMAppService.mainApp.status == .enabled
     @State private var appearanceMode: AppearanceMode = {
@@ -215,12 +216,27 @@ struct SettingsView: View {
         .fixedSize(horizontal: false, vertical: true)
         .frame(width: 700)
         .overlay(alignment: .bottomTrailing) {
-            let version = Bundle.main.infoDictionary?["CFBundleShortVersionString"] as? String ?? "?"
-            Text("v\(version)")
-                .font(.caption2)
-                .foregroundStyle(.tertiary)
-                .padding(8)
+            HStack(spacing: 4) {
+                Text("v\(updateChecker.currentVersion)")
+                    .font(.caption2)
+                    .foregroundStyle(.tertiary)
+                if let update = updateChecker.availableUpdate {
+                    Text("·")
+                        .font(.caption2)
+                        .foregroundStyle(.tertiary)
+                    Button("\(update) available") {
+                        NSPasteboard.general.clearContents()
+                        NSPasteboard.general.setString(updateChecker.installCommand, forType: .string)
+                    }
+                    .buttonStyle(.plain)
+                    .font(.caption2)
+                    .foregroundStyle(.blue)
+                    .help("Click to copy install command")
+                }
+            }
+            .padding(8)
         }
+        .onAppear { updateChecker.checkIfNeeded() }
     }
 
     @ViewBuilder

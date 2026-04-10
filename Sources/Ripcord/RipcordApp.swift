@@ -4,6 +4,7 @@ import TranscribeKit
 @main
 struct RipcordApp: App {
     @State private var manager: RecordingManager
+    @State private var updateChecker = UpdateChecker()
 
     init() {
         let mgr = RecordingManager()
@@ -13,10 +14,12 @@ struct RipcordApp: App {
             let raw = UserDefaults.standard.string(forKey: SettingsKey.appearanceOverride) ?? "system"
             AppearanceMode.apply(AppearanceMode(rawValue: raw) ?? .system)
         }
+        let checker = _updateChecker.wrappedValue
         Task {
             await mgr.startBufferingOnce()
             // Prompt to download models on first launch
             await MainActor.run { Self.promptForModelDownloadIfNeeded(manager: mgr) }
+            await checker.check()
         }
         NotificationCenter.default.addObserver(
             forName: NSApplication.willTerminateNotification,
@@ -54,7 +57,7 @@ struct RipcordApp: App {
         .menuBarExtraStyle(.window)
 
         Settings {
-            SettingsView(manager: manager)
+            SettingsView(manager: manager, updateChecker: updateChecker)
         }
 
         Window("Live Transcript", id: "copilot") {

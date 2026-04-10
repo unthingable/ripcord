@@ -6,29 +6,35 @@ macOS menubar app for retroactive audio recording with transcription.
   <img src="assets/app.png" width="240" alt="Ripcord menubar panel">
 </p>
 
+The key idea: Ripcord runs a circular buffer in the background. When something worth keeping happens, you save it — and the audio that already happened is already there.
+
 ## Features
 
+### Audio Capture
+
 - **Retroactive circular buffer** — 1–15 min configurable; save audio that already happened
-- **System audio + microphone** capture — mix together or split into stereo (system L, mic R)
-- **Live waveform + level meters** — real-time visualization during buffering and recording
-- **Capture duration scrubber** — drag to select how much of the buffer to keep
-- **Mic device selection** — choose input device from the menubar
-- **WAV and M4A output** with configurable quality
-- **Silence auto-pause** — automatically pauses recording during silence
+- **System audio + microphone** — mix into one track or split into stereo (system L, mic R) for post-production remixing
+- **Mic device selection** — choose any input device from the menubar
+- **Silence auto-pause** — automatically pauses recording during silence, with configurable RMS threshold and duration
+
+### Transcription
+
 - **Built-in transcription** with speaker diarization (via [FluidAudio](https://github.com/FluidInference/FluidAudio))
-- **Transcript formats** — txt, md, json, srt, vtt
-- **Live transcript** — real-time streaming transcription in a dedicated window with tunable parameters
-- **Speaker identity persistence** — voice profiles saved across transcriptions with automatic matching
+- **Speaker identity persistence** — voice profiles saved across sessions with automatic matching
 - **Video file transcription** — transcribe audio from MP4, MOV, AVI, and other video formats
+- **Re-transcribe** — re-process any recording with different settings
 - **Filler word removal** — strip um, uh, etc. from transcripts
-- **Re-transcribe** — re-process recordings with different settings
-- **Transcribe external files** — import and transcribe any audio/video file
-- **Remote control socket** — Unix domain socket for external tools to receive live transcript data
-- **Recent recordings** — quick access with copy-transcript and re-transcribe actions
-- **`transcribe` CLI** for batch transcription
-- **Appearance themes** — System, Light, or Dark
-- **Global hotkey** — Cmd+Shift+R
-- **Launch at login** — optional auto-start with macOS
+- **Transcript formats** — txt, md, json, srt, vtt
+
+### Live Transcript
+
+- **Real-time streaming transcription** in a dedicated window
+- **Remote control socket** — Unix domain socket for external tools to receive live transcript data and control the session
+- **Tunable parameters** — adjust diarization sensitivity, speaker count, and display options live
+
+### CLI
+
+- **`transcribe` CLI** for batch transcription — bundled inside the app, usable standalone
 
 ## Install
 
@@ -68,37 +74,15 @@ Launch Ripcord from the menubar. It immediately starts filling a circular buffer
 
 The **waveform** shows live audio amplitude. During buffering, the highlighted region shows how much audio will be captured; during recording, the entire waveform turns red. The **level meters** on the right show two bars — blue for system audio, cyan for mic.
 
-### Microphone
-
-Use the mic dropdown at the bottom of the panel to select an input device, or toggle the mic off entirely. System audio is always captured regardless of mic setting. The stereo toggle switches between mixed (both sources in both channels) and split (system in left, mic in right) — useful for post-production remixing.
-
-### Settings
-
-Click the gear icon to open the settings panel.
-
-**Recording** — set the buffer duration (1–15 min), output format (WAV or M4A), and M4A quality (64–256 kbps). These are locked while recording.
-
-**Silence detection** — enable auto-pause to stop recording during silence. Configure the RMS threshold and how long silence must last before pausing.
-
-**Transcription** — download models (one-time), then configure defaults for auto-transcription:
-- Language model: Multilingual (v3) or English-only (v2)
-- Transcript format: txt, md, json, srt, vtt
-- Remove filler words (um, uh, etc.)
-- Speaker attribution (diarization) with sensitivity and expected speaker count
-
-Enable "Transcribe recordings" to automatically transcribe every new recording.
-
-**General** — choose the output directory and enable launch at login.
-
 ### Transcription
 
 After recording, your files appear in **Recent recordings** at the bottom of the panel. From there you can:
 
-- **Transcribe** — click to open a config popover where you pick model, format, filler removal, and speaker settings, then transcribe
-- **Copy transcript** — copy the full transcript text to the clipboard
-- **Re-transcribe** — re-process a recording with different settings
+- **Transcribe** — pick model, format, and speaker settings, then transcribe
+- **Copy transcript** — copy the full transcript to the clipboard
+- **Re-transcribe** — re-process with different settings
 
-To transcribe an external audio file, click **Transcribe file** at the bottom-left of the panel.
+To transcribe an external audio or video file, click **Transcribe file** at the bottom-left of the panel. Model downloads are one-time and happen through Settings.
 
 ### Transcribe CLI
 
