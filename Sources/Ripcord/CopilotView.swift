@@ -18,6 +18,22 @@ struct CopilotView: View {
                     .font(.headline)
                 Spacer()
                 Button {
+                    transcriptState.userScrolledUp.toggle()
+                } label: {
+                    Image(systemName: "pin.fill")
+                        .font(.caption2)
+                        .foregroundStyle(
+                            transcriptState.userScrolledUp
+                                ? AnyShapeStyle(.primary)
+                                : AnyShapeStyle(Color(nsColor: .controlBackgroundColor))
+                        )
+                        .padding(.horizontal, 6)
+                        .padding(.vertical, 3)
+                        .background(.quaternary, in: RoundedRectangle(cornerRadius: 4))
+                }
+                .buttonStyle(.plain)
+                .help(transcriptState.userScrolledUp ? "Click to resume autoscroll" : "Click to pin view and stop autoscroll")
+                Button {
                     showControls.toggle()
                 } label: {
                     Image(systemName: "slider.horizontal.3")

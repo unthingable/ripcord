@@ -19,19 +19,6 @@ struct TranscriptPanel: View {
                 StickyBottom(enabled: !state.userScrolledUp)
             }
         }
-        .overlay(alignment: .bottomTrailing) {
-            Button {
-                state.userScrolledUp.toggle()
-            } label: {
-                Image(systemName: state.userScrolledUp ? "arrow.down.to.line" : "pin.fill")
-                    .font(.caption)
-                    .frame(width: 24, height: 24)
-                    .background(.ultraThinMaterial, in: Circle())
-            }
-            .buttonStyle(.plain)
-            .padding(8)
-            .help(state.userScrolledUp ? "Resume autoscroll" : "Autoscroll on")
-        }
     }
 }
 
@@ -53,7 +40,6 @@ private struct StickyBottom: NSViewRepresentable {
     func updateNSView(_ nsView: NSView, context: Context) {
         let wasEnabled = context.coordinator.enabled
         context.coordinator.enabled = enabled
-        // If just toggled on, scroll to bottom immediately
         if enabled && !wasEnabled {
             context.coordinator.scrollToBottom()
         }
