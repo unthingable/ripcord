@@ -52,6 +52,7 @@ enum SettingsKey {
     static let recordingNameHistory = "ripcord.recordingNameHistory"
     static let appearanceOverride = "ripcord.appearanceOverride"
     static let liveTranscriptEnabled = "ripcord.liveTranscriptEnabled"
+    static let autoLiveTranscript = "ripcord.autoLiveTranscript"
     static let liveTranscriptChunkSize = "ripcord.liveTranscriptChunkSize"
     static let liveTranscriptRightContext = "ripcord.liveTranscriptRightContext"
     static let liveTranscriptMinContext = "ripcord.liveTranscriptMinContext"
@@ -115,6 +116,7 @@ final class RecordingManager: @unchecked Sendable {
     var recordingName: String = ""
     var nameHistory: [String] = []
     var liveTranscriptEnabled: Bool = false
+    var autoLiveTranscript: Bool = false
     var liveTranscriptClientCount: Int = 0
     var liveTranscriptChunkSize: Double = 3.0
     var liveTranscriptRightContext: Double = 1.0
@@ -298,6 +300,7 @@ final class RecordingManager: @unchecked Sendable {
 
         // Live transcript
         liveTranscriptEnabled = defaults.bool(forKey: SettingsKey.liveTranscriptEnabled)
+        autoLiveTranscript = defaults.bool(forKey: SettingsKey.autoLiveTranscript)
         let savedChunk = defaults.double(forKey: SettingsKey.liveTranscriptChunkSize)
         liveTranscriptChunkSize = savedChunk > 0 ? savedChunk : 3.0
         let savedRC = defaults.double(forKey: SettingsKey.liveTranscriptRightContext)
@@ -591,10 +594,18 @@ final class RecordingManager: @unchecked Sendable {
             guard self.state != .paused else { return }
             self.recordingElapsed = Date().timeIntervalSince(start) - self.pausedDuration
         }
+
+        if autoLiveTranscript && !liveTranscriptEnabled {
+            Task { await setLiveTranscriptEnabled(true) }
+        }
     }
 
     func stopRecording() {
         guard state == .recording || state == .paused else { return }
+
+        if autoLiveTranscript && liveTranscriptEnabled {
+            Task { await setLiveTranscriptEnabled(false) }
+        }
 
         // Finalize any ongoing pause
         if let pauseStart = pauseStartTime {
@@ -931,6 +942,11 @@ final class RecordingManager: @unchecked Sendable {
     func updateFilePrefix(_ prefix: String) {
         filePrefix = prefix
         UserDefaults.standard.set(prefix, forKey: SettingsKey.filePrefix)
+    }
+
+    func updateAutoLiveTranscript(_ enabled: Bool) {
+        autoLiveTranscript = enabled
+        UserDefaults.standard.set(enabled, forKey: SettingsKey.autoLiveTranscript)
     }
 
     func setLiveTranscriptEnabled(_ enabled: Bool) async {

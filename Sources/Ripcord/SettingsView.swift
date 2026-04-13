@@ -195,6 +195,12 @@ struct SettingsView: View {
                     ))
                     .disabled(!manager.transcriptionService.modelsLoaded)
 
+                    Toggle("Start with recording", isOn: Binding(
+                        get: { manager.autoLiveTranscript },
+                        set: { manager.updateAutoLiveTranscript($0) }
+                    ))
+                    .disabled(!manager.transcriptionService.modelsLoaded)
+
                     LabeledContent("Socket") {
                         Text("/tmp/ripcord-transcript.sock")
                             .font(.caption)

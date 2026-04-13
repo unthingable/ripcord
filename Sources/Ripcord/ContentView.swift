@@ -489,7 +489,10 @@ struct ContentView: View {
     private var configSummary: some View {
         let bufferLabel = manager.bufferDurationSeconds / 60
         let formatLabel = manager.outputFormat.rawValue
-        Text("Buffer: \(bufferLabel) min  \u{2022}  \(formatLabel)")
+        let qualityLabel = manager.outputFormat == .wav
+            ? "16-bit"
+            : manager.audioQuality.label(for: manager.outputFormat)
+        Text("Buffer: \(bufferLabel) min  \u{2022}  \(formatLabel)  \u{2022}  \(qualityLabel)")
             .font(.caption)
     }
 
