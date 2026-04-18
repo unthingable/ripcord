@@ -3,7 +3,7 @@ import SwiftUI
 /// Live transcript window. Phase 2: transcript only. Phase 3 will add chat + sidebar.
 struct CopilotView: View {
     var manager: RecordingManager
-    @State private var transcriptState = TranscriptState()
+    private var transcriptState: TranscriptState { manager.transcriptState }
     @State private var chunkSize: Double = 3.0
     @State private var rightContext: Double = 1.0
     @State private var minContext: Double = 5.0
@@ -90,12 +90,6 @@ struct CopilotView: View {
             minContext = manager.liveTranscriptMinContext
             confirmThreshold = manager.liveTranscriptConfirmThreshold
         }
-        .task(id: manager.liveTranscriptStream.map { ObjectIdentifier($0) }) {
-            await connectToStream()
-        }
-        .onDisappear {
-            transcriptState.stopConsuming()
-        }
     }
 
     private func configRow(
@@ -160,8 +154,4 @@ struct CopilotView: View {
         .frame(maxWidth: .infinity)
     }
 
-    private func connectToStream() async {
-        guard let stream = manager.liveTranscriptStream?.wordStream else { return }
-        transcriptState.startConsuming(stream)
-    }
 }

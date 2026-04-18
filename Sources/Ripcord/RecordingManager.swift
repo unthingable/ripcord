@@ -145,6 +145,10 @@ final class RecordingManager: @unchecked Sendable {
     private var transcriptSocketServer: TranscriptSocketServer?
     private let liveTranscriptLock = NSLock()
 
+    // App-scoped transcript state — survives window close/open so reopening
+    // doesn't replay the backlog word-by-word.
+    let transcriptState: TranscriptState
+
     // Dedicated write queue for off-thread file I/O
     private let writeQueue = DispatchQueue(label: "com.vibe.ripcord.writequeue")
     private var writer: AudioFileWriter?  // Only accessed on writeQueue
@@ -210,6 +214,8 @@ final class RecordingManager: @unchecked Sendable {
         // Init buffers first (required before accessing self properties with @Observable)
         systemBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
         micBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
+
+        transcriptState = MainActor.assumeIsolated { TranscriptState() }
 
         let resolvedDir: URL
         if let dirPath = defaults.string(forKey: SettingsKey.outputDirectory), !dirPath.isEmpty {
@@ -1240,6 +1246,15 @@ final class RecordingManager: @unchecked Sendable {
 
         liveTranscriptLock.withLock { liveTranscriptStream = stream }
         liveTranscriptClientCount = server.connectedClientCount
+
+        // Attach app-scoped transcript state to the word stream so turns
+        // accumulate regardless of whether the transcript window is open.
+        if let wordStream = stream.wordStream {
+            await MainActor.run {
+                self.transcriptState.clear()
+                self.transcriptState.startConsuming(wordStream)
+            }
+        }
     }
 
     func stopLiveTranscript() async {
@@ -1250,6 +1265,7 @@ final class RecordingManager: @unchecked Sendable {
         }
         await stream?.stop()
         liveTranscriptClientCount = 0
+        await MainActor.run { self.transcriptState.stopConsuming() }
     }
 
     func setLiveTranscriptChunkSize(_ size: Double) async {

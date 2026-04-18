@@ -56,6 +56,16 @@ final class TranscriptState {
     private static let pauseThreshold: TimeInterval = 0.5
     private static let turnBreakThreshold: TimeInterval = 2.0
 
+    /// Drop turns older than this relative to the newest confirmed word.
+    /// Protects against unbounded growth if the user leaves live transcript on for days.
+    private static let retentionSeconds: TimeInterval = 90 * 60
+    /// Hard backstop if word rate or stream-time behavior ever defeats the time-based prune.
+    private static let hardTurnCap = 2000
+
+    /// Highest word.end observed from full-chunk (non-hypothesis) words.
+    /// Used as the reference point for the retention window.
+    private var maxSeenEnd: TimeInterval = 0
+
     private var consumeTask: Task<Void, Never>?
 
     /// Returns the confirmed-through end time for a given source.
@@ -81,6 +91,7 @@ final class TranscriptState {
     func clear() {
         turns.removeAll()
         confirmedThrough.removeAll()
+        maxSeenEnd = 0
     }
 
     private func addWord(_ word: TranscriptWord) {
@@ -95,6 +106,22 @@ final class TranscriptState {
             // Full-chunk word: retract any hypothesis words for this source first
             retractHypothesisWords(source: word.source)
             appendWord(word)
+            if word.end > maxSeenEnd { maxSeenEnd = word.end }
+            pruneOldTurns()
+        }
+    }
+
+    /// Drop turns whose last word is older than the retention window, plus a hard count backstop.
+    /// Only runs on full-chunk words (hypothesis words are transient).
+    private func pruneOldTurns() {
+        let cutoff = maxSeenEnd - Self.retentionSeconds
+        while let first = turns.first,
+              let lastEnd = first.phrases.last?.words.last?.end,
+              lastEnd < cutoff {
+            turns.removeFirst()
+        }
+        if turns.count > Self.hardTurnCap {
+            turns.removeFirst(turns.count - Self.hardTurnCap)
         }
     }
 
