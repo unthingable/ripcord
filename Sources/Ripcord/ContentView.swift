@@ -14,10 +14,29 @@ struct ContentView: View {
     @State private var fileTranscribeURL: URL?
     @State private var renamingURL: URL?
     @State private var renameText: String = ""
+    @AppStorage(SettingsKey.mainPanelRecentsHeight) private var recentsHeight: Double = 160
+    @State private var dragStartHeight: Double?
+    @State private var resizeHovering = false
     // Stored outside @State to avoid MainActor-isolation issues in NotificationCenter closures
     private static nonisolated(unsafe) var settingsCloseObserver: NSObjectProtocol?
 
     var body: some View {
+        mainContent
+            .padding(8)
+            .frame(width: 320)
+            .background(Color(nsColor: .windowBackgroundColor))
+            .overlay(alignment: .bottom) {
+                if !manager.recentRecordings.isEmpty {
+                    resizeHandle
+                }
+            }
+            .onAppear {
+                setupGlobalHotkey()
+            }
+    }
+
+    @ViewBuilder
+    private var mainContent: some View {
         VStack(alignment: .leading, spacing: 8) {
             // Status
             statusSection
@@ -121,6 +140,9 @@ struct ContentView: View {
                 }
                 .keyboardShortcut("q")
             }
+            .contentShape(Rectangle())
+            .onHover { resizeHovering = $0 }
+            .simultaneousGesture(resizeDrag)
 
             if let error = manager.transcriptionService.lastTranscriptionError {
                 Text(error)
@@ -128,12 +150,6 @@ struct ContentView: View {
                     .foregroundStyle(.red)
                     .lineLimit(2)
             }
-        }
-        .padding(8)
-        .frame(width: 320)
-        .background(Color(nsColor: .windowBackgroundColor))
-        .onAppear {
-            setupGlobalHotkey()
         }
     }
 
@@ -643,8 +659,41 @@ struct ContentView: View {
                     }
                 }
             }
-            .frame(maxHeight: 160)
+            .frame(height: recentsHeight)
         }
+    }
+
+    // MARK: - Resize Handle
+
+    /// Thin bottom-edge band that resizes the recents section. Visually minimal
+    /// at rest, brightens on hover. Uses .global coordinate space so the drag
+    /// doesn't chase the moving view (local translation would underreport since
+    /// the handle moves down with the growing popover).
+    /// Visible grip line pinned to the popover's bottom edge. Not hit-testable —
+    /// the drag gesture is attached to the whole bottom button row, so the
+    /// entire row is draggable while the buttons still receive taps.
+    @ViewBuilder
+    private var resizeHandle: some View {
+        Capsule()
+            .fill(.secondary.opacity(resizeHovering ? 0.65 : 0.4))
+            .frame(width: resizeHovering ? 48 : 36, height: 3)
+            .padding(.bottom, 3)
+            .animation(.easeInOut(duration: 0.15), value: resizeHovering)
+            .allowsHitTesting(false)
+    }
+
+    /// Drag gesture shared between any draggable surface (currently the bottom
+    /// button row). `minimumDistance: 5` lets button taps through — only real
+    /// drags resize. Global coordinate space avoids a feedback loop where the
+    /// moving view would otherwise chase the cursor.
+    private var resizeDrag: some Gesture {
+        DragGesture(minimumDistance: 5, coordinateSpace: .global)
+            .onChanged { value in
+                if dragStartHeight == nil { dragStartHeight = recentsHeight }
+                let base = dragStartHeight ?? recentsHeight
+                recentsHeight = max(80, min(600, base + value.translation.height))
+            }
+            .onEnded { _ in dragStartHeight = nil }
     }
 
     @ViewBuilder

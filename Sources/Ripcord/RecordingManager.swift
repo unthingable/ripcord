@@ -58,6 +58,7 @@ enum SettingsKey {
     static let liveTranscriptMinContext = "ripcord.liveTranscriptMinContext"
     static let liveTranscriptConfirmThreshold = "ripcord.liveTranscriptConfirmThreshold"
     static let modelDownloadPromptDismissed = "ripcord.modelDownloadPromptDismissed"
+    static let mainPanelRecentsHeight = "ripcord.mainPanelRecentsHeight"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
