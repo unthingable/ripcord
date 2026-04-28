@@ -298,7 +298,14 @@ struct ContentView: View {
                 GeometryReader { geo in
                     let width = geo.size.width
                     let bufMax = Double(max(1, manager.bufferDurationSeconds))
-                    let captureFraction = Double(manager.captureDurationSeconds) / bufMax
+                    // While recording/paused, the handle slides left in lockstep with
+                    // recorded elapsed so right-of-handle always reflects total captured
+                    // audio (back-record + recorded so far). captureDurationSeconds itself
+                    // is not mutated — it stays as the user's back-record preference.
+                    let effectiveCapture = isCapturing
+                        ? min(bufMax, Double(manager.captureDurationSeconds) + manager.recordingElapsed)
+                        : Double(manager.captureDurationSeconds)
+                    let captureFraction = effectiveCapture / bufMax
                     let handleX = width * (1 - captureFraction)
                     let amps = manager.waveformAmplitudes
                     let states = manager.waveformBarStates
@@ -347,8 +354,10 @@ struct ContentView: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(color))
                         }
 
-                        // Handle line (hidden during recording/paused)
-                        if !isCapturing, handleX <= size.width {
+                        // Handle line — visible in all states. During recording the
+                        // handle slides left as recordingElapsed grows, marking the start
+                        // of the captured region.
+                        if handleX >= 0, handleX <= size.width {
                             let handleRect = CGRect(x: handleX - 1, y: 0, width: 2, height: size.height)
                             context.fill(
                                 Path(roundedRect: handleRect, cornerRadius: 1),

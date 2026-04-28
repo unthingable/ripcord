@@ -135,6 +135,10 @@ final class RecordingManager: @unchecked Sendable {
     private var systemBuffer: CircularAudioBuffer
     private var micBuffer: CircularAudioBuffer
 
+    // Shared waveform tracker — both sources feed peaks here; bars commit on a
+    // wall-clock cadence so all 100 slots advance together.
+    private var waveformTracker: WaveformTracker
+
     // Pending sample accumulation for recording — protected by pendingLock
     private var pendingActive = false
     private var pendingSystemSamples: [Float] = []
@@ -215,6 +219,7 @@ final class RecordingManager: @unchecked Sendable {
         // Init buffers first (required before accessing self properties with @Observable)
         systemBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
         micBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
+        waveformTracker = WaveformTracker(durationSeconds: duration)
 
         transcriptState = MainActor.assumeIsolated { TranscriptState() }
 
@@ -539,10 +544,8 @@ final class RecordingManager: @unchecked Sendable {
 
         // Mark back-record bars as recorded and set state for new bars
         let barsInCapture = min(100, captureDurationSeconds * 100 / max(1, bufferDurationSeconds))
-        systemBuffer.markRecentBars(barsInCapture, state: .recorded)
-        micBuffer.markRecentBars(barsInCapture, state: .recorded)
-        systemBuffer.setBarState(.recorded)
-        micBuffer.setBarState(.recorded)
+        waveformTracker.markRecentBars(barsInCapture, state: .recorded)
+        waveformTracker.setBarState(.recorded)
 
         // Enable pending AFTER reading (tiny sample gap is negligible)
         pendingLock.lock()
@@ -628,10 +631,8 @@ final class RecordingManager: @unchecked Sendable {
         isSilencePaused = false
 
         // Dim recorded/paused bars to prior variants, set new bars to idle
-        systemBuffer.dimAllBars()
-        micBuffer.dimAllBars()
-        systemBuffer.setBarState(.idle)
-        micBuffer.setBarState(.idle)
+        waveformTracker.dimAllBars()
+        waveformTracker.setBarState(.idle)
 
         // Disable pending accumulation and grab remaining samples
         pendingLock.lock()
@@ -750,8 +751,7 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         // Update bar states to paused
-        systemBuffer.setBarState(.paused)
-        micBuffer.setBarState(.paused)
+        waveformTracker.setBarState(.paused)
 
         // Track pause time
         pauseStartTime = Date()
@@ -776,8 +776,7 @@ final class RecordingManager: @unchecked Sendable {
         pendingLock.unlock()
 
         // Update bar states to recorded
-        systemBuffer.setBarState(.recorded)
-        micBuffer.setBarState(.recorded)
+        waveformTracker.setBarState(.recorded)
 
         // Update elapsed immediately so the display doesn't lag for up to 1 second
         if let start = recordingStartTime {
@@ -809,6 +808,7 @@ final class RecordingManager: @unchecked Sendable {
         UserDefaults.standard.set(seconds, forKey: SettingsKey.bufferDuration)
         systemBuffer.resize(durationSeconds: seconds, sampleRate: AudioConstants.sampleRateInt)
         micBuffer.resize(durationSeconds: seconds, sampleRate: AudioConstants.sampleRateInt)
+        waveformTracker.resize(durationSeconds: seconds)
         // Clamp capture duration to not exceed new buffer size
         if captureDurationSeconds > seconds {
             updateCaptureDuration(seconds)
@@ -1069,9 +1069,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     private func updateFilledBarCount() {
-        let samples = max(systemBuffer.sampleCount, micBuffer.sampleCount)
-        let samplesPerBar = bufferDurationSeconds * AudioConstants.sampleRateInt / 100
-        filledBarCount = min(100, samples / max(1, samplesPerBar) + 1) // +1 for live bar
+        filledBarCount = min(100, waveformTracker.committedCount + 1) // +1 for live bar
     }
 
     func shutdown() {
@@ -1335,6 +1333,10 @@ final class RecordingManager: @unchecked Sendable {
         if peak > peakAccum { peakAccum = peak }
         meterLock.unlock()
 
+        // Feed shared waveform tracker — bar commits are wall-clock driven, so
+        // both sources contribute to one synchronized timeline.
+        waveformTracker.feedPeak(peak)
+
         // Always write to circular buffer (continuous waveform)
         buffer.write(samples)
 
@@ -1471,17 +1473,11 @@ final class RecordingManager: @unchecked Sendable {
         systemLevel = max(systemLevel * 0.6, meterPeaks.system)
         micLevel = max(micLevel * 0.6, meterPeaks.mic)
 
-        // Waveform always from circular buffers (continuous, never resets)
-        let (sysPeaks, sysStates) = systemBuffer.getBarPeaks()
-        let (micPeaks, micStates) = micBuffer.getBarPeaks()
-        var mergedPeaks = [Float](repeating: 0, count: 100)
-        var mergedStates = [BarState](repeating: .idle, count: 100)
-        for i in 0..<100 {
-            mergedPeaks[i] = max(sysPeaks[i], micPeaks[i])
-            mergedStates[i] = max(sysStates[i], micStates[i])
-        }
-        waveformAmplitudes = mergedPeaks
-        waveformBarStates = mergedStates
+        // Waveform from shared tracker — peaks are already merged across sources
+        // and bars commit on a single wall-clock cadence.
+        let (peaks, states) = waveformTracker.getBarPeaks()
+        waveformAmplitudes = peaks
+        waveformBarStates = states
         updateFilledBarCount()
     }
 
