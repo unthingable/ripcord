@@ -90,11 +90,13 @@ public struct TranscriptMetadata: Sendable {
     public let duration: TimeInterval
     public let speakers: [String]
     public let sourceFile: String
+    public let configSummary: String?
 
-    public init(duration: TimeInterval, speakers: [String], sourceFile: String) {
+    public init(duration: TimeInterval, speakers: [String], sourceFile: String, configSummary: String? = nil) {
         self.duration = duration
         self.speakers = speakers
         self.sourceFile = sourceFile
+        self.configSummary = configSummary
     }
 }
 

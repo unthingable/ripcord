@@ -206,7 +206,8 @@ final class TranscriptionService: @unchecked Sendable {
             let metadata = TranscriptMetadata(
                 duration: result.duration,
                 speakers: result.speakers,
-                sourceFile: fileURL.path)
+                sourceFile: fileURL.path,
+                configSummary: Self.configSummary(config))
             let formatted = formatOutput(
                 segments: segments, metadata: metadata, format: format)
             try formatted.write(to: transcriptURL, atomically: true, encoding: .utf8)
@@ -275,7 +276,8 @@ final class TranscriptionService: @unchecked Sendable {
             let metadata = TranscriptMetadata(
                 duration: saved.result.duration,
                 speakers: saved.result.speakers,
-                sourceFile: fileURL.path)
+                sourceFile: fileURL.path,
+                configSummary: Self.configSummary(saved.config))
             let formatted = formatOutput(
                 segments: segments, metadata: metadata, format: saved.config.transcriptFormat)
             try? formatted.write(to: saved.transcriptURL, atomically: true, encoding: .utf8)
@@ -423,6 +425,31 @@ final class TranscriptionService: @unchecked Sendable {
             }
             try? content.write(to: url, atomically: true, encoding: .utf8)
         }
+    }
+
+    // MARK: - Config Summary
+
+    private static func configSummary(_ config: TranscriptionConfig) -> String {
+        var parts = ["whisper-\(config.asrModelVersion.rawValue)"]
+        if config.diarizationEnabled {
+            let engine: String
+            switch config.diarizationEngine {
+            case .offline: engine = "pyannote"
+            case .lseend: engine = "ls-eend"
+            case .sortformer: engine = "sortformer"
+            }
+            parts.append("\(engine) \(config.diarizationQuality.rawValue)")
+            let speakers = config.expectedSpeakerCount > 0 ? "\(config.expectedSpeakerCount)" : "auto"
+            parts.append("speakers: \(speakers)")
+            parts.append("sensitivity: \(config.speakerSensitivity.rawValue)")
+            parts.append("speech: \(config.speechThreshold)")
+            parts.append("min-seg: \(config.minSegmentDuration)s")
+            parts.append("min-gap: \(config.minGapDuration)s")
+            if config.removeFillerWords { parts.append("fillers removed") }
+        } else {
+            parts.append("no diarization")
+        }
+        return parts.joined(separator: " | ")
     }
 
     // MARK: - Errors

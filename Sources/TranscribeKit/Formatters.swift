@@ -86,6 +86,10 @@ private func formatTxt(segments: [TranscriptSegment], metadata: TranscriptMetada
     let hasSpeakers = segments.contains { $0.speaker != nil }
 
     var lines: [String] = []
+    if let config = metadata.configSummary {
+        lines.append("# \(config)")
+        lines.append("")
+    }
     if hasSpeakers {
         for group in groupBySpeaker(segments) {
             lines.append("[\(formatTimestamp(group.start))] \(group.speaker ?? "Unknown"):")
@@ -112,6 +116,9 @@ private func formatMd(segments: [TranscriptSegment], metadata: TranscriptMetadat
     ]
     if !metadata.speakers.isEmpty {
         lines.append("- **Speakers:** \(metadata.speakers.count)")
+    }
+    if let config = metadata.configSummary {
+        lines.append("- **Settings:** \(config)")
     }
     lines += ["", "---", ""]
 
@@ -149,6 +156,7 @@ private struct JsonMetadata: Encodable {
     let duration: Double
     let speakers: [String]
     let source_file: String
+    let settings: String?
 }
 
 private struct JsonOutput: Encodable {
@@ -161,7 +169,8 @@ private func formatJson(segments: [TranscriptSegment], metadata: TranscriptMetad
         metadata: JsonMetadata(
             duration: metadata.duration,
             speakers: metadata.speakers,
-            source_file: metadata.sourceFile),
+            source_file: metadata.sourceFile,
+            settings: metadata.configSummary),
         segments: segments.map { seg in
             JsonSegment(start: seg.start, end: seg.end, text: seg.text, speaker: seg.speaker)
         })

@@ -155,10 +155,28 @@ struct TranscribeCLI: AsyncParsableCommand {
         }
 
         // 4. Format and write output
+        var configParts = ["whisper-\(model.rawValue)"]
+        if noDiarize {
+            configParts.append("no diarization")
+        } else {
+            configParts.append("\(engine.rawValue) \(fast ? "fast" : "balanced")")
+            let speakers: String
+            if let n = numSpeakers { speakers = "\(n)" }
+            else if minSpeakers != nil || maxSpeakers != nil {
+                speakers = "\(minSpeakers.map(String.init) ?? "?")–\(maxSpeakers.map(String.init) ?? "?")"
+            } else { speakers = "auto" }
+            configParts.append("speakers: \(speakers)")
+            configParts.append("sensitivity: \(sensitivity ?? 0.75)")
+            configParts.append("speech: \(speechThreshold ?? 0.5)")
+            configParts.append("min-seg: \(minSegment ?? 0.1)s")
+            configParts.append("min-gap: \(minGap ?? 0.0)s")
+            if removeFillers { configParts.append("fillers removed") }
+        }
         let metadata = TranscriptMetadata(
             duration: result.duration,
             speakers: result.speakers,
-            sourceFile: audioFile)
+            sourceFile: audioFile,
+            configSummary: configParts.joined(separator: " | "))
 
         let formatted = formatOutput(
             segments: result.segments, metadata: metadata, format: outputFormat)
