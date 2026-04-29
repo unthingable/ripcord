@@ -4,6 +4,7 @@ import TranscribeKit
 
 extension ModelVersion: ExpressibleByArgument {}
 extension OutputFormat: ExpressibleByArgument {}
+extension DiarizationEngine: ExpressibleByArgument {}
 
 /// Print a message to stderr (progress/status output).
 func log(_ message: String) {
@@ -55,6 +56,9 @@ struct TranscribeCLI: AsyncParsableCommand {
     @Flag(name: .customLong("fast"), help: "Use fast diarization quality (default: balanced)")
     var fast: Bool = false
 
+    @Option(name: .customLong("engine"), help: "Diarization engine: offline, lseend, sortformer")
+    var engine: DiarizationEngine = .offline
+
     @Flag(name: .customLong("remove-fillers"), help: "Remove filler words (um, uh, etc.)")
     var removeFillers: Bool = false
 
@@ -85,9 +89,9 @@ struct TranscribeCLI: AsyncParsableCommand {
         }
 
         // 1. Prepare models
-        log("Loading ASR models (\(model.rawValue))...")
+        log("Loading ASR models (\(model.rawValue)), diarizer: \(engine.rawValue)...")
         let transcriber = Transcriber()
-        try await transcriber.prepareModels(version: model) { progress in
+        try await transcriber.prepareModels(version: model, engine: engine) { progress in
             if progress >= 0.5 {
                 log("Models loaded, preparing diarization...")
             }
@@ -107,6 +111,7 @@ struct TranscribeCLI: AsyncParsableCommand {
                 speakerCount = .auto
             }
             diarization = DiarizationConfig(
+                engine: engine,
                 quality: fast ? .fast : .balanced,
                 clusteringThreshold: sensitivity,
                 speakerCount: speakerCount,

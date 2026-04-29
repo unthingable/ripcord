@@ -77,6 +77,7 @@ enum SpeakerSensitivity: String, CaseIterable {
 struct TranscriptionConfig: Equatable {
     var asrModelVersion: ModelVersion = .v3
     var diarizationEnabled: Bool = true
+    var diarizationEngine: DiarizationEngine = .offline
     var speakerSensitivity: SpeakerSensitivity = .medium
     var expectedSpeakerCount: Int = -1  // -1 = auto
     var transcriptFormat: OutputFormat = .txt

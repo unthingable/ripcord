@@ -8,6 +8,12 @@ public enum ModelVersion: String, CaseIterable, Sendable {
 
 // MARK: - Diarization Configuration
 
+public enum DiarizationEngine: String, CaseIterable, Sendable {
+    case offline      // Pyannote-style segmentation + embedding + clustering (~1s boundary resolution)
+    case lseend       // LS-EEND end-to-end neural diarizer (100ms frame precision, up to 10 speakers)
+    case sortformer   // NVIDIA Sortformer (80ms frames, 4 fixed speaker slots)
+}
+
 public enum DiarizationQuality: String, CaseIterable, Sendable {
     case fast      // FluidAudio defaults (faster, less accurate boundaries)
     case balanced  // stepRatio 0.05 for denser frames (~2x slower)
@@ -20,6 +26,7 @@ public enum SpeakerCount: Sendable, Equatable {
 }
 
 public struct DiarizationConfig: Sendable {
+    public var engine: DiarizationEngine
     public var quality: DiarizationQuality
     public var clusteringThreshold: Double?
     public var speakerCount: SpeakerCount
@@ -29,6 +36,7 @@ public struct DiarizationConfig: Sendable {
     public var removeFillerWords: Bool
 
     public init(
+        engine: DiarizationEngine = .offline,
         quality: DiarizationQuality = .balanced,
         clusteringThreshold: Double? = nil,
         speakerCount: SpeakerCount = .auto,
@@ -37,6 +45,7 @@ public struct DiarizationConfig: Sendable {
         minGapDuration: Double? = nil,
         removeFillerWords: Bool = false
     ) {
+        self.engine = engine
         self.quality = quality
         self.clusteringThreshold = clusteringThreshold
         self.speakerCount = speakerCount

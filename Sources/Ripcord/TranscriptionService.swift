@@ -28,6 +28,7 @@ private struct SegmentTiming: Codable {
 private struct PendingSpeakers: Codable {
     let audioFile: String  // filename only, for portability
     let transcriptExtension: String
+    let transcriptFile: String?  // actual transcript filename including version suffix (e.g. "recording-1.txt")
     let speakers: [UnmatchedSpeaker]
     let segments: [SegmentTiming]
 }
@@ -41,7 +42,10 @@ final class TranscriptionService: @unchecked Sendable {
     var unmatchedSpeakers: [URL: [UnmatchedSpeaker]] = [:]
 
     /// Stored so we can re-format after naming.
-    private var lastResults: [URL: (result: TranscriptionResult, config: TranscriptionConfig, mapping: [String: String])] = [:]
+    private var lastResults: [URL: (result: TranscriptionResult, config: TranscriptionConfig, mapping: [String: String], transcriptURL: URL)] = [:]
+
+    /// Transcript URL loaded from sidecar files (for post-restart speaker naming).
+    private var lastTranscriptURLs: [URL: URL] = [:]
 
     /// Segment timings loaded from sidecar files (for audio preview after restart).
     private var loadedSegments: [URL: [SegmentTiming]] = [:]
@@ -68,7 +72,7 @@ final class TranscriptionService: @unchecked Sendable {
         await MainActor.run { state = fromCache ? .loadingModels : .downloadingModels(0) }
 
         do {
-            try await transcriber.prepareModels(version: config.asrModelVersion) { [weak self] progress in
+            try await transcriber.prepareModels(version: config.asrModelVersion, engine: config.diarizationEngine) { [weak self] progress in
                 if !fromCache {
                     Task { @MainActor in
                         self?.state = .downloadingModels(progress)
@@ -90,7 +94,7 @@ final class TranscriptionService: @unchecked Sendable {
 
     /// Check whether model files exist on disk (no download, no loading).
     static func modelsExistOnDisk(config: TranscriptionConfig) -> Bool {
-        Transcriber.modelsExistOnDisk(version: config.asrModelVersion)
+        Transcriber.modelsExistOnDisk(version: config.asrModelVersion, engine: config.diarizationEngine)
     }
 
     // MARK: - Transcription Pipeline
@@ -143,6 +147,7 @@ final class TranscriptionService: @unchecked Sendable {
                     speakerCount = .auto
                 }
                 diarization = DiarizationConfig(
+                    engine: config.diarizationEngine,
                     quality: config.diarizationQuality,
                     clusteringThreshold: Double(config.speakerSensitivity.clusteringThreshold),
                     speakerCount: speakerCount,
@@ -162,55 +167,48 @@ final class TranscriptionService: @unchecked Sendable {
             var segments = result.segments
             var speakerMapping: [String: String] = [:]
 
+            // Compute transcript URL before speaker matching so it can be stored
+            // with unmatched speakers (needed to apply labels to the correct file)
+            let format = config.transcriptFormat
+            let baseTranscriptURL = fileURL.deletingPathExtension().appendingPathExtension(format.rawValue)
+            let transcriptURL = overwrite ? baseTranscriptURL : uniqueFileURL(for: baseTranscriptURL)
+
             if let embeddings = result.speakerEmbeddings, !embeddings.isEmpty,
                let store = speakerProfileStore {
                 let matchResult = SpeakerMatcher.match(
                     embeddings: embeddings, profiles: store.profiles)
 
-                // Build mapping from matched profiles and update their embeddings
                 for (rawID, profile) in matchResult.matched {
                     speakerMapping[rawID] = profile.name
-                    if let embedding = embeddings[rawID] {
-                        // Only update stored embedding on high-confidence matches
-                        // to prevent drift from marginal matches
-                        let sim = SpeakerMatcher.cosineSimilarity(embedding, profile.embedding)
-                        if sim >= 0.85 {
-                            store.updateEmbedding(id: profile.id, newEmbedding: embedding)
-                        }
-                    }
                 }
 
-                // Apply mapping to segments
                 segments = SpeakerMatcher.remapSegments(segments, mapping: speakerMapping)
 
-                // Store unmatched speakers for naming UI
-                if !matchResult.unmatched.isEmpty {
-                    let unmatched = matchResult.unmatched.map { (rawID, embedding) in
-                        UnmatchedSpeaker(id: rawID, embedding: embedding)
-                    }.sorted { $0.id < $1.id }
-
-                    // Store result + config for re-formatting after naming
-                    await MainActor.run {
-                        self.unmatchedSpeakers[fileURL] = unmatched
-                        self.lastResults[fileURL] = (result, config, speakerMapping)
+                // All speakers go to confirmation UI — matched ones pre-filled
+                let allSpeakers = embeddings.map { (rawID, embedding) in
+                    var speaker = UnmatchedSpeaker(id: rawID, embedding: embedding)
+                    if let profile = matchResult.matched[rawID] {
+                        speaker.name = profile.name
                     }
+                    return speaker
+                }.sorted { $0.id < $1.id }
 
-                    // Persist to disk so naming survives app restart
-                    self.writePendingSpeakers(unmatched, for: fileURL,
-                                              format: config.transcriptFormat, result: result)
+                await MainActor.run {
+                    self.unmatchedSpeakers[fileURL] = allSpeakers
+                    self.lastResults[fileURL] = (result, config, speakerMapping, transcriptURL)
                 }
+
+                self.writePendingSpeakers(allSpeakers, for: fileURL,
+                                          format: format, result: result,
+                                          transcriptURL: transcriptURL)
             }
 
-            let format = config.transcriptFormat
             let metadata = TranscriptMetadata(
                 duration: result.duration,
                 speakers: result.speakers,
                 sourceFile: fileURL.path)
             let formatted = formatOutput(
                 segments: segments, metadata: metadata, format: format)
-
-            let baseTranscriptURL = fileURL.deletingPathExtension().appendingPathExtension(format.rawValue)
-            let transcriptURL = overwrite ? baseTranscriptURL : uniqueFileURL(for: baseTranscriptURL)
             try formatted.write(to: transcriptURL, atomically: true, encoding: .utf8)
 
             await MainActor.run {
@@ -280,17 +278,16 @@ final class TranscriptionService: @unchecked Sendable {
                 sourceFile: fileURL.path)
             let formatted = formatOutput(
                 segments: segments, metadata: metadata, format: saved.config.transcriptFormat)
-            let transcriptURL = fileURL.deletingPathExtension()
-                .appendingPathExtension(saved.config.transcriptFormat.rawValue)
-            try? formatted.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            try? formatted.write(to: saved.transcriptURL, atomically: true, encoding: .utf8)
         } else if !newMapping.isEmpty {
-            // Post-restart: find and string-replace raw IDs in the transcript file
-            replaceInTranscriptFiles(for: fileURL, mapping: newMapping)
+            replaceInTranscriptFiles(for: fileURL, mapping: newMapping,
+                                     transcriptURL: lastTranscriptURLs[fileURL])
         }
 
         // Clear state and remove sidecar
         unmatchedSpeakers.removeValue(forKey: fileURL)
         lastResults.removeValue(forKey: fileURL)
+        lastTranscriptURLs.removeValue(forKey: fileURL)
         loadedSegments.removeValue(forKey: fileURL)
         removePendingSpeakersFile(for: fileURL)
     }
@@ -346,6 +343,7 @@ final class TranscriptionService: @unchecked Sendable {
     func skipNaming(for fileURL: URL) {
         unmatchedSpeakers.removeValue(forKey: fileURL)
         lastResults.removeValue(forKey: fileURL)
+        lastTranscriptURLs.removeValue(forKey: fileURL)
         loadedSegments.removeValue(forKey: fileURL)
         removePendingSpeakersFile(for: fileURL)
     }
@@ -369,6 +367,9 @@ final class TranscriptionService: @unchecked Sendable {
                 continue
             }
             unmatchedSpeakers[audioURL] = pending.speakers
+            if let transcriptFile = pending.transcriptFile {
+                lastTranscriptURLs[audioURL] = directory.appendingPathComponent(transcriptFile)
+            }
             if !pending.segments.isEmpty {
                 loadedSegments[audioURL] = pending.segments
             }
@@ -376,13 +377,15 @@ final class TranscriptionService: @unchecked Sendable {
     }
 
     private func writePendingSpeakers(_ speakers: [UnmatchedSpeaker], for fileURL: URL,
-                                      format: OutputFormat, result: TranscriptionResult) {
+                                      format: OutputFormat, result: TranscriptionResult,
+                                      transcriptURL: URL) {
         let timings = result.segments.map {
             SegmentTiming(start: $0.start, end: $0.end, speaker: $0.speaker)
         }
         let pending = PendingSpeakers(
             audioFile: fileURL.lastPathComponent,
             transcriptExtension: format.rawValue,
+            transcriptFile: transcriptURL.lastPathComponent,
             speakers: speakers,
             segments: timings)
         let encoder = JSONEncoder()
@@ -404,15 +407,21 @@ final class TranscriptionService: @unchecked Sendable {
 
     /// String-replace raw speaker IDs in transcript files (used post-restart when
     /// the full TranscriptionResult is no longer in memory).
-    private func replaceInTranscriptFiles(for fileURL: URL, mapping: [String: String]) {
-        let base = fileURL.deletingPathExtension()
-        for format in OutputFormat.allCases {
-            let transcriptURL = base.appendingPathExtension(format.rawValue)
-            guard var content = try? String(contentsOf: transcriptURL, encoding: .utf8) else { continue }
+    private func replaceInTranscriptFiles(for fileURL: URL, mapping: [String: String],
+                                          transcriptURL: URL? = nil) {
+        var urls: [URL]
+        if let url = transcriptURL {
+            urls = [url]
+        } else {
+            let base = fileURL.deletingPathExtension()
+            urls = OutputFormat.allCases.map { base.appendingPathExtension($0.rawValue) }
+        }
+        for url in urls {
+            guard var content = try? String(contentsOf: url, encoding: .utf8) else { continue }
             for (rawID, name) in mapping {
                 content = content.replacingOccurrences(of: rawID, with: name)
             }
-            try? content.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            try? content.write(to: url, atomically: true, encoding: .utf8)
         }
     }
 

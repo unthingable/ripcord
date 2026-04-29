@@ -826,10 +826,11 @@ private struct RecordingRowView: View {
             }
 
             if renamingURL != recording.url {
-                if let unmatched = manager.transcriptionService.unmatchedSpeakers[recording.url],
-                   !unmatched.isEmpty {
+                if let pending = manager.transcriptionService.unmatchedSpeakers[recording.url],
+                   !pending.isEmpty {
+                    let newCount = pending.filter { $0.name.isEmpty }.count
                     Button(action: { showSpeakerNaming = true }) {
-                        Text("\(unmatched.count) new")
+                        Text(newCount > 0 ? "\(newCount) new" : "confirm")
                             .font(.caption2)
                             .padding(.horizontal, 5)
                             .padding(.vertical, 1)
@@ -837,7 +838,7 @@ private struct RecordingRowView: View {
                             .foregroundStyle(.teal)
                     }
                     .buttonStyle(.plain)
-                    .help("Name new speakers")
+                    .help(newCount > 0 ? "Name new speakers" : "Confirm speaker identification")
                     .popover(isPresented: $showSpeakerNaming, arrowEdge: .trailing) {
                         SpeakerNamingPopover(
                             fileURL: recording.url,
@@ -957,7 +958,7 @@ private struct SpeakerNamingPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
-            Text("Name New Speakers")
+            Text("Confirm Speakers")
                 .font(.caption)
 
             if let speakers = service.unmatchedSpeakers[fileURL] {
@@ -1149,6 +1150,7 @@ struct DefaultMarkSlider: View {
 
 struct TranscriptionConfigForm: View {
     @Binding var config: TranscriptionConfig
+    @State private var advancedExpanded = false
 
     var body: some View {
         VStack(alignment: .leading, spacing: 6) {
@@ -1172,6 +1174,13 @@ struct TranscriptionConfigForm: View {
                 .controlSize(.small)
 
             if config.diarizationEnabled {
+                Picker("Diarizer", selection: $config.diarizationEngine) {
+                    Text("Pyannote").tag(DiarizationEngine.offline)
+                    Text("LS-EEND").tag(DiarizationEngine.lseend)
+                    Text("Sortformer").tag(DiarizationEngine.sortformer)
+                }
+                .controlSize(.small)
+
                 Picker("Quality", selection: $config.diarizationQuality) {
                     Text("Fast").tag(DiarizationQuality.fast)
                     Text("Balanced").tag(DiarizationQuality.balanced)
@@ -1193,7 +1202,9 @@ struct TranscriptionConfigForm: View {
                 }
                 .controlSize(.small)
 
-                DisclosureGroup("Advanced") {
+                expandableHeader("Advanced", isExpanded: $advancedExpanded)
+                    .controlSize(.small)
+                if advancedExpanded {
                     HStack {
                         Text("Speech threshold")
                         DefaultMarkSlider(value: $config.speechThreshold, range: 0.1...0.9, step: 0.05, defaultValue: 0.5)
@@ -1221,9 +1232,25 @@ struct TranscriptionConfigForm: View {
                             .frame(width: 40)
                     }
                 }
-                .controlSize(.small)
             }
         }
+        .transaction { $0.animation = nil }
+    }
+
+    private func expandableHeader(_ title: String, isExpanded: Binding<Bool>) -> some View {
+        Button {
+            isExpanded.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(isExpanded.wrappedValue ? .degrees(90) : .zero)
+                Text(title)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 }
 

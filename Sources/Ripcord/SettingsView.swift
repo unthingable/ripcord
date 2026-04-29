@@ -37,6 +37,11 @@ struct SettingsView: View {
         let raw = UserDefaults.standard.string(forKey: SettingsKey.appearanceOverride) ?? "system"
         return AppearanceMode(rawValue: raw) ?? .system
     }()
+    @State private var installedModels: [InstalledModel] = []
+    @State private var modelToDelete: InstalledModel?
+    @State private var modelsExpanded = false
+    @State private var speakersExpanded = false
+    @State private var advancedExpanded = false
 
     private var isRecording: Bool { manager.state == .recording || manager.state == .paused }
 
@@ -180,6 +185,7 @@ struct SettingsView: View {
             .formStyle(.grouped)
             .scrollDisabled(true)
             .fixedSize(horizontal: false, vertical: true)
+            .environment(\.defaultMinListRowHeight, 4)
 
             Form {
                 Section("Transcription") {
@@ -214,13 +220,16 @@ struct SettingsView: View {
                     }
                     .opacity(manager.liveTranscriptEnabled ? 1 : 0.4)
                 }
+
             }
             .formStyle(.grouped)
             .scrollDisabled(true)
             .fixedSize(horizontal: false, vertical: true)
+            .environment(\.defaultMinListRowHeight, 4)
         }
         .fixedSize(horizontal: false, vertical: true)
-        .frame(width: 700)
+        .frame(width: 640)
+        .transaction { $0.animation = nil }
         .overlay(alignment: .bottomTrailing) {
             HStack(spacing: 4) {
                 Text("v\(updateChecker.currentVersion)")
@@ -242,7 +251,33 @@ struct SettingsView: View {
             }
             .padding(8)
         }
-        .onAppear { updateChecker.checkIfNeeded() }
+        .onAppear {
+            updateChecker.checkIfNeeded()
+            refreshModels()
+        }
+        .alert("Delete Model",
+               isPresented: Binding(
+                   get: { modelToDelete != nil },
+                   set: { if !$0 { modelToDelete = nil } }
+               )
+        ) {
+            Button("Cancel", role: .cancel) { modelToDelete = nil }
+            Button("Delete", role: .destructive) {
+                if let model = modelToDelete {
+                    try? ModelManager.deleteModel(model)
+                    refreshModels()
+                }
+                modelToDelete = nil
+            }
+        } message: {
+            if let model = modelToDelete {
+                Text("Delete \(model.name)? You'll need to re-download it to use this feature again.")
+            }
+        }
+    }
+
+    private func refreshModels() {
+        installedModels = ModelManager.installedModels(config: manager.transcriptionConfig)
     }
 
     @ViewBuilder
@@ -286,6 +321,15 @@ struct SettingsView: View {
                     .font(.caption)
             }
 
+            if !installedModels.isEmpty {
+                let totalBytes = installedModels.reduce(into: Int64(0)) { $0 += $1.sizeBytes }
+                expandableHeader("Downloaded — \(ByteCountFormatter.string(fromByteCount: totalBytes, countStyle: .file))",
+                                 isExpanded: $modelsExpanded)
+                if modelsExpanded {
+                    modelsSection
+                }
+            }
+
             Toggle("Transcribe recordings", isOn: Binding(
                 get: { manager.transcriptionEnabled },
                 set: { manager.updateTranscriptionEnabled($0) }
@@ -307,6 +351,14 @@ struct SettingsView: View {
             Toggle("Remove filler words", isOn: manager.transcriptionConfigBinding(\.removeFillerWords))
 
             Toggle("Speaker attribution", isOn: manager.transcriptionConfigBinding(\.diarizationEnabled))
+
+            Picker("Diarizer", selection: manager.transcriptionConfigBinding(\.diarizationEngine)) {
+                Text("Pyannote").tag(DiarizationEngine.offline)
+                Text("LS-EEND").tag(DiarizationEngine.lseend)
+                Text("Sortformer").tag(DiarizationEngine.sortformer)
+            }
+            .pickerStyle(.segmented)
+            .disabled(!manager.transcriptionConfig.diarizationEnabled)
 
             Picker("Quality", selection: manager.transcriptionConfigBinding(\.diarizationQuality)) {
                 Text("Fast").tag(DiarizationQuality.fast)
@@ -337,7 +389,9 @@ struct SettingsView: View {
             }
 
             if !manager.speakerProfileStore.profiles.isEmpty {
-                DisclosureGroup("Saved Speakers (\(manager.speakerProfileStore.profiles.count))") {
+                expandableHeader("Saved Speakers (\(manager.speakerProfileStore.profiles.count))",
+                                 isExpanded: $speakersExpanded)
+                if speakersExpanded {
                     ForEach(manager.speakerProfileStore.profiles) { profile in
                         HStack {
                             Text(profile.name)
@@ -360,45 +414,104 @@ struct SettingsView: View {
                 }
             }
 
-            DisclosureGroup("Advanced") {
-                HStack {
-                    Text("Speech threshold")
-                    DefaultMarkSlider(
-                        value: manager.transcriptionConfigBinding(\.speechThreshold),
-                        range: 0.1...0.9, step: 0.05, defaultValue: 0.5
-                    )
-                    Text(String(format: "%.2f", manager.transcriptionConfig.speechThreshold))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .frame(width: 34)
-                }
+            Group {
+                expandableHeader("Advanced", isExpanded: $advancedExpanded)
+                if advancedExpanded {
+                    HStack {
+                        Text("Speech threshold")
+                        DefaultMarkSlider(
+                            value: manager.transcriptionConfigBinding(\.speechThreshold),
+                            range: 0.1...0.9, step: 0.05, defaultValue: 0.5
+                        )
+                        Text(String(format: "%.2f", manager.transcriptionConfig.speechThreshold))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 34)
+                    }
 
-                HStack {
-                    Text("Min segment")
-                    DefaultMarkSlider(
-                        value: manager.transcriptionConfigBinding(\.minSegmentDuration),
-                        range: 0.05...2.0, step: 0.05, defaultValue: 1.0
-                    )
-                    Text(String(format: "%.2fs", manager.transcriptionConfig.minSegmentDuration))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .frame(width: 40)
-                }
+                    HStack {
+                        Text("Min segment")
+                        DefaultMarkSlider(
+                            value: manager.transcriptionConfigBinding(\.minSegmentDuration),
+                            range: 0.05...2.0, step: 0.05, defaultValue: 1.0
+                        )
+                        Text(String(format: "%.2fs", manager.transcriptionConfig.minSegmentDuration))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 40)
+                    }
 
-                HStack {
-                    Text("Min gap")
-                    DefaultMarkSlider(
-                        value: manager.transcriptionConfigBinding(\.minGapDuration),
-                        range: 0.0...1.0, step: 0.05, defaultValue: 0.1
-                    )
-                    Text(String(format: "%.2fs", manager.transcriptionConfig.minGapDuration))
-                        .font(.caption)
-                        .monospacedDigit()
-                        .frame(width: 40)
+                    HStack {
+                        Text("Min gap")
+                        DefaultMarkSlider(
+                            value: manager.transcriptionConfigBinding(\.minGapDuration),
+                            range: 0.0...1.0, step: 0.05, defaultValue: 0.1
+                        )
+                        Text(String(format: "%.2fs", manager.transcriptionConfig.minGapDuration))
+                            .font(.caption)
+                            .monospacedDigit()
+                            .frame(width: 40)
+                    }
                 }
             }
             .disabled(!manager.transcriptionConfig.diarizationEnabled)
         }
+    }
+
+    @ViewBuilder
+    private var modelsSection: some View {
+        if installedModels.isEmpty {
+            Text("No models downloaded")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        } else {
+            VStack(spacing: 6) {
+                ForEach(installedModels) { model in
+                    HStack {
+                        VStack(alignment: .leading, spacing: 1) {
+                            HStack(spacing: 4) {
+                                Text(model.name)
+                                    .font(.caption)
+                                if !model.isUsed {
+                                    Text("unused")
+                                        .font(.caption2)
+                                        .foregroundStyle(.orange)
+                                }
+                            }
+                            Text(ByteCountFormatter.string(fromByteCount: model.sizeBytes, countStyle: .file))
+                                .font(.caption2)
+                                .foregroundStyle(.tertiary)
+                        }
+                        Spacer()
+                        Button(role: .destructive) {
+                            modelToDelete = model
+                        } label: {
+                            Image(systemName: "trash")
+                                .font(.caption)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Delete \(model.name)")
+                    }
+                }
+            }
+        }
+    }
+
+    private func expandableHeader(_ title: String, isExpanded: Binding<Bool>) -> some View {
+        Button {
+            isExpanded.wrappedValue.toggle()
+        } label: {
+            HStack(spacing: 4) {
+                Image(systemName: "chevron.right")
+                    .font(.system(size: 10, weight: .semibold))
+                    .foregroundStyle(.secondary)
+                    .rotationEffect(isExpanded.wrappedValue ? .degrees(90) : .zero)
+                Text(title)
+            }
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
     }
 
     private var micStatusLabel: String {

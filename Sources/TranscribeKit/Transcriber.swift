@@ -10,22 +10,36 @@ public final class Transcriber: @unchecked Sendable {
 
     // MARK: - Model Lifecycle
 
-    public static func modelsExistOnDisk(version: ModelVersion) -> Bool {
+    public static func modelsExistOnDisk(version: ModelVersion, engine: DiarizationEngine = .offline) -> Bool {
         let asrVersion: AsrModelVersion = version == .v2 ? .v2 : .v3
         let asrDir = AsrModels.defaultCacheDirectory(for: asrVersion)
         guard AsrModels.modelsExist(at: asrDir, version: asrVersion) else { return false }
 
-        // Check that the offline diarizer models directory exists and is non-empty.
-        // The exact model files are managed by FluidAudio internally.
-        let diaDir = OfflineDiarizerModels.defaultModelsDirectory()
-        guard let contents = try? FileManager.default.contentsOfDirectory(atPath: diaDir.path),
-              !contents.isEmpty
-        else { return false }
-        return true
+        switch engine {
+        case .offline:
+            let diaDir = OfflineDiarizerModels.defaultModelsDirectory()
+            guard let contents = try? FileManager.default.contentsOfDirectory(atPath: diaDir.path),
+                  !contents.isEmpty
+            else { return false }
+            return true
+        case .lseend:
+            let modelsDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("FluidAudio/Models")
+                .appendingPathComponent(Repo.lseend.folderName)
+            let variant = LSEENDVariant.dihard3
+            return FileManager.default.fileExists(atPath: modelsDir.appendingPathComponent(variant.modelFile).path)
+                && FileManager.default.fileExists(atPath: modelsDir.appendingPathComponent(variant.configFile).path)
+        case .sortformer:
+            let modelsDir = FileManager.default.urls(for: .applicationSupportDirectory, in: .userDomainMask)[0]
+                .appendingPathComponent("FluidAudio/Models")
+                .appendingPathComponent(Repo.sortformer.folderName)
+            return FileManager.default.fileExists(atPath: modelsDir.path)
+        }
     }
 
     public func prepareModels(
         version: ModelVersion,
+        engine: DiarizationEngine = .offline,
         progress: @Sendable (Double) -> Void = { _ in }
     ) async throws {
         progress(0.1)
@@ -37,9 +51,17 @@ public final class Transcriber: @unchecked Sendable {
 
         progress(0.5)
 
-        // Pre-download diarization models so they're available for transcribe calls
-        let diarizer = OfflineDiarizerManager()
-        try await diarizer.prepareModels()
+        switch engine {
+        case .offline:
+            let diarizer = OfflineDiarizerManager()
+            try await diarizer.prepareModels()
+        case .lseend:
+            _ = try await LSEENDModelDescriptor.loadFromHuggingFace(variant: .dihard3)
+            _ = try await DiarizerModels.download()
+        case .sortformer:
+            _ = try await SortformerModels.loadFromHuggingFace(config: .default)
+            _ = try await DiarizerModels.download()
+        }
 
         progress(1.0)
 
@@ -79,43 +101,14 @@ public final class Transcriber: @unchecked Sendable {
         // Diarization
         var diarizationResult: DiarizationResult?
         if let config = diarization {
-            var diarizerConfig = OfflineDiarizerConfig()
-
-            switch config.speakerCount {
-            case .auto:
-                break
-            case .exactly(let n):
-                diarizerConfig = diarizerConfig.withSpeakers(exactly: n)
-            case .range(let min, let max):
-                diarizerConfig = diarizerConfig.withSpeakers(min: min, max: max)
+            switch config.engine {
+            case .offline:
+                diarizationResult = try await diarizeOffline(fileURL: processURL, config: config)
+            case .lseend:
+                diarizationResult = try await diarizeWithLSEEND(fileURL: processURL)
+            case .sortformer:
+                diarizationResult = try await diarizeWithSortformer(fileURL: processURL)
             }
-
-            // FluidAudio defaults to clustering threshold 0.6, which is too
-            // conservative and fragments speakers. Match pyannote's optimized ~0.7.
-            diarizerConfig.clustering.threshold = config.clusteringThreshold ?? 0.75
-            if let t = config.speechThreshold {
-                diarizerConfig.segmentation.speechOnsetThreshold = t
-                diarizerConfig.segmentation.speechOffsetThreshold = t
-            }
-
-            switch config.quality {
-            case .balanced:
-                diarizerConfig.segmentation.stepRatio = 0.05
-            case .fast:
-                break
-            }
-
-            // FluidAudio defaults to 1.0s minimum segment duration, which discards
-            // brief but real speaker turns at boundaries, shifting them by up to ~1s.
-            // Use a much lower threshold to preserve boundary precision.
-            diarizerConfig.embedding.minSegmentDurationSeconds = config.minSegmentDuration ?? 0.1
-            if let g = config.minGapDuration {
-                diarizerConfig.postProcessing.minGapDurationSeconds = g
-            }
-
-            let diarizer = OfflineDiarizerManager(config: diarizerConfig)
-            try await diarizer.prepareModels()
-            diarizationResult = try await diarizer.process(processURL)
         }
 
         try Task.checkCancellation()
@@ -153,6 +146,137 @@ public final class Transcriber: @unchecked Sendable {
             return a
         }
         await asr?.cleanup()
+    }
+
+    // MARK: - Diarization Engines
+
+    private func diarizeWithLSEEND(fileURL: URL) async throws -> DiarizationResult {
+        let descriptor = try await LSEENDModelDescriptor.loadFromHuggingFace(variant: .dihard3)
+        let diarizer = LSEENDDiarizer(computeUnits: .cpuOnly)
+        try diarizer.initialize(descriptor: descriptor)
+        let timeline = try diarizer.processComplete(audioFileURL: fileURL)
+
+        // Extract speaker embeddings using the WeSpeaker model for identification
+        let speakerDB = try await extractSpeakerEmbeddings(
+            from: fileURL, timeline: timeline)
+
+        return timelineToDiarizationResult(timeline, speakerDatabase: speakerDB)
+    }
+
+    private func diarizeOffline(fileURL: URL, config: DiarizationConfig) async throws -> DiarizationResult {
+        var diarizerConfig = OfflineDiarizerConfig()
+
+        switch config.speakerCount {
+        case .auto:
+            break
+        case .exactly(let n):
+            diarizerConfig = diarizerConfig.withSpeakers(exactly: n)
+        case .range(let min, let max):
+            diarizerConfig = diarizerConfig.withSpeakers(min: min, max: max)
+        }
+
+        diarizerConfig.clustering.threshold = config.clusteringThreshold ?? 0.75
+        if let t = config.speechThreshold {
+            diarizerConfig.segmentation.speechOnsetThreshold = t
+            diarizerConfig.segmentation.speechOffsetThreshold = t
+        }
+
+        switch config.quality {
+        case .balanced:
+            diarizerConfig.segmentation.stepRatio = 0.05
+        case .fast:
+            break
+        }
+
+        diarizerConfig.embedding.minSegmentDurationSeconds = config.minSegmentDuration ?? 0.1
+        if let g = config.minGapDuration {
+            diarizerConfig.postProcessing.minGapDurationSeconds = g
+        }
+
+        let diarizer = OfflineDiarizerManager(config: diarizerConfig)
+        try await diarizer.prepareModels()
+        return try await diarizer.process(fileURL)
+    }
+
+    private func diarizeWithSortformer(fileURL: URL) async throws -> DiarizationResult {
+        let models = try await SortformerModels.loadFromHuggingFace(config: .default)
+        let diarizer = SortformerDiarizer()
+        diarizer.initialize(models: models)
+
+        let converter = AudioConverter(sampleRate: 16000)
+        let audio = try converter.resampleAudioFile(fileURL)
+        let timeline = try diarizer.processComplete(audio, sourceSampleRate: 16000)
+
+        let speakerDB = try await extractSpeakerEmbeddings(
+            from: fileURL, timeline: timeline)
+
+        return timelineToDiarizationResult(timeline, speakerDatabase: speakerDB)
+    }
+
+    /// Convert LS-EEND DiarizerTimeline to the DiarizationResult format consumed by the merge pipeline.
+    private func timelineToDiarizationResult(
+        _ timeline: DiarizerTimeline,
+        speakerDatabase: [String: [Float]]? = nil
+    ) -> DiarizationResult {
+        var segments: [TimedSpeakerSegment] = []
+        for (_, speaker) in timeline.speakers {
+            let speakerId = speaker.name ?? "SPEAKER_\(speaker.index)"
+            for seg in speaker.finalizedSegments {
+                segments.append(TimedSpeakerSegment(
+                    speakerId: speakerId,
+                    embedding: [],
+                    startTimeSeconds: seg.startTime,
+                    endTimeSeconds: seg.endTime,
+                    qualityScore: seg.confidence))
+            }
+        }
+        segments.sort { $0.startTimeSeconds < $1.startTimeSeconds }
+        return DiarizationResult(segments: segments, speakerDatabase: speakerDatabase)
+    }
+
+    /// Extract 256-dim WeSpeaker embeddings for each speaker using LS-EEND segments.
+    ///
+    /// For each speaker, collects their longest segments (up to 10s of audio),
+    /// loads the corresponding audio, and runs the WeSpeaker embedding model.
+    private func extractSpeakerEmbeddings(
+        from fileURL: URL,
+        timeline: DiarizerTimeline
+    ) async throws -> [String: [Float]] {
+        let models = try await DiarizerModels.download()
+        let diarizerManager = DiarizerManager()
+        diarizerManager.initialize(models: models)
+
+        let converter = AudioConverter(sampleRate: 16000)
+        let audio16k = try converter.resampleAudioFile(fileURL)
+
+        var speakerDB: [String: [Float]] = [:]
+        let maxSamples = 160_000  // 10s at 16kHz — model's input window
+
+        for (_, speaker) in timeline.speakers {
+            let speakerId = speaker.name ?? "SPEAKER_\(speaker.index)"
+            let segments = speaker.finalizedSegments.sorted { $0.duration > $1.duration }
+            guard !segments.isEmpty else { continue }
+
+            // Collect audio from longest segments up to 10s
+            var collected: [Float] = []
+            for seg in segments {
+                guard collected.count < maxSamples else { break }
+                let startSample = max(0, Int(seg.startTime * 16000))
+                let endSample = min(audio16k.count, Int(seg.endTime * 16000))
+                guard endSample > startSample else { continue }
+                let remaining = maxSamples - collected.count
+                let take = min(endSample - startSample, remaining)
+                collected.append(contentsOf: audio16k[startSample..<(startSample + take)])
+            }
+
+            guard collected.count >= 8000 else { continue } // need at least 0.5s
+
+            let embedding = try diarizerManager.extractSpeakerEmbedding(from: collected)
+            speakerDB[speakerId] = embedding
+        }
+
+        diarizerManager.cleanup()
+        return speakerDB
     }
 
     // MARK: - Errors
