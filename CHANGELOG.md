@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.11.0
+
+- Fix recording appearing to stop on its own during a meeting. A live transcript error was overwriting the recording state, making the UI show "not recording" while audio continued writing to disk — but the file couldn't be finalized cleanly.
+- Fix potential crash when system audio capture teardown races with a device-change restart. Both paths could destroy the same CoreAudio objects simultaneously. Teardown is now serialized with a lock.
+- Fix silent audio loss when pausing a recording on a full disk. Write errors during the pause flush were swallowed instead of being reported when the recording stopped.
+- Handle SIGTERM/SIGINT to finalize recordings before exit, so killing the process no longer produces corrupt M4A files with missing headers.
+- Fix potential deadlock in transcript socket broadcast when cleaning up disconnected clients.
+
 ## 0.10.1
 
 - Prompt to download transcription models on first launch instead of requiring users to find the option in Settings.
