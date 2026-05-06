@@ -176,15 +176,16 @@ final class TranscriptSocketServer: @unchecked Sendable {
             }
         }
 
-        // Cancel read sources BEFORE closing FDs to prevent use-after-close
+        // Cancel read sources BEFORE closing FDs to prevent use-after-close.
+        // Uses async to avoid deadlock if broadcast is ever called from queue.
         if !deadFDs.isEmpty {
             let fds = deadFDs
-            queue.sync { [weak self] in
+            queue.async { [weak self] in
                 for fd in fds {
                     self?.readSources[fd]?.cancel()
                 }
+                for fd in fds { close(fd) }
             }
-            for fd in fds { close(fd) }
         }
     }
 

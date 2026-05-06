@@ -197,6 +197,9 @@ final class RecordingManager: @unchecked Sendable {
     private var directoryMonitorSource: DispatchSourceFileSystemObject?
     private var directoryMonitorFD: Int32 = -1
 
+    // Signal handlers for clean shutdown on kill
+    private var signalSources: [DispatchSourceSignal] = []
+
     init() {
         let defaults = UserDefaults.standard
         let defaultDir = FileManager.default.homeDirectoryForCurrentUser
@@ -322,6 +325,21 @@ final class RecordingManager: @unchecked Sendable {
         liveTranscriptMinContext = savedMinCtx > 0 ? savedMinCtx : 5.0
         let savedThresh = defaults.double(forKey: SettingsKey.liveTranscriptConfirmThreshold)
         liveTranscriptConfirmThreshold = savedThresh > 0 ? savedThresh : 0.65
+
+        installSignalHandlers()
+    }
+
+    private func installSignalHandlers() {
+        for sig in [SIGTERM, SIGINT] {
+            signal(sig, SIG_IGN)
+            let source = DispatchSource.makeSignalSource(signal: sig, queue: .main)
+            source.setEventHandler { [weak self] in
+                self?.shutdown()
+                exit(0)
+            }
+            source.resume()
+            signalSources.append(source)
+        }
     }
 
     deinit {
@@ -752,7 +770,11 @@ final class RecordingManager: @unchecked Sendable {
             self.micRemainder = []
             let stereo = self.packStereo(finalSys, finalMic)
             if !stereo.isEmpty {
-                try? w.append(samples: stereo)
+                do {
+                    try w.append(samples: stereo)
+                } catch {
+                    self.writeError = error
+                }
             }
         }
 

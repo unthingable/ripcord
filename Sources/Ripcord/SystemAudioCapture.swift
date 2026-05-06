@@ -25,6 +25,10 @@ final class SystemAudioCapture: @unchecked Sendable {
     // Resampling state (lazy-initialized if tap sample rate differs from target)
     private var converter: AudioConverterRef?
 
+    // Serializes teardown so stop() and restartAfterRouteChange() can't
+    // double-destroy the same CoreAudio objects.
+    private let resourceLock = NSLock()
+
     // Route-change handling
     private var routeChangeListener: AudioObjectPropertyListenerBlock?
     private var restartWorkItem: DispatchWorkItem?
@@ -130,6 +134,15 @@ final class SystemAudioCapture: @unchecked Sendable {
         restartTask?.cancel()
         restartTask = nil
         removeRouteChangeListener()
+        tearDownResources()
+    }
+
+    /// Atomically claims and destroys all CoreAudio resources.  Safe to call
+    /// from multiple threads — the lock ensures only the first caller tears
+    /// down; subsequent callers find everything already nil/unknown.
+    private func tearDownResources() {
+        resourceLock.lock()
+        defer { resourceLock.unlock() }
 
         if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
             _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
@@ -211,24 +224,7 @@ final class SystemAudioCapture: @unchecked Sendable {
         // IOState goes through [0, 0] instead of [1, 0] → [2, 0].
         // The [2, 0] escalation blocks VoiceProcessingIO in meeting apps.
         onWillRestart?()
-
-        if let ioProcID, aggregateDeviceID != kAudioObjectUnknown {
-            _ = AudioDeviceStop(aggregateDeviceID, ioProcID)
-            _ = AudioDeviceDestroyIOProcID(aggregateDeviceID, ioProcID)
-            self.ioProcID = nil
-        }
-        if aggregateDeviceID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyAggregateDevice(aggregateDeviceID)
-            aggregateDeviceID = AudioObjectID(kAudioObjectUnknown)
-        }
-        if tapID != kAudioObjectUnknown {
-            _ = AudioHardwareDestroyProcessTap(tapID)
-            tapID = AudioObjectID(kAudioObjectUnknown)
-        }
-        if let converter {
-            AudioConverterDispose(converter)
-            self.converter = nil
-        }
+        tearDownResources()
 
         // Check cancellation before expensive recreation
         guard !Task.isCancelled else { return }
