@@ -1247,7 +1247,10 @@ final class RecordingManager: @unchecked Sendable {
                 confirmationThreshold: liveTranscriptConfirmThreshold
             )
         } catch {
-            state = .error("Live transcript: \(error.localizedDescription)")
+            logger.error("Live transcript start failed: \(error.localizedDescription)")
+            if state != .recording && state != .paused {
+                state = .error("Live transcript: \(error.localizedDescription)")
+            }
             return
         }
 
@@ -1309,7 +1312,10 @@ final class RecordingManager: @unchecked Sendable {
                 confirmationThreshold: liveTranscriptConfirmThreshold
             )
         } catch {
-            state = .error("Live transcript reconfigure: \(error.localizedDescription)")
+            logger.error("Live transcript reconfigure failed: \(error.localizedDescription)")
+            if state != .recording && state != .paused {
+                state = .error("Live transcript reconfigure: \(error.localizedDescription)")
+            }
         }
     }
 
