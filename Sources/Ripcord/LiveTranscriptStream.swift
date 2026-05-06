@@ -270,6 +270,8 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     // MARK: - Flush (runs on flushQueue — NOT a real-time thread)
 
+    private var flushCount = 0
+
     private func flushPendingSamples() {
         // Drain pending samples under lock
         let (sysSamples, micSamples) = pendingLock.withLock { () -> ([Float], [Float]) in
@@ -283,6 +285,12 @@ final class LiveTranscriptStream: @unchecked Sendable {
         // Snapshot manager pointers under lock (hot-swap may be in progress)
         let (sysMgr, micMgr, pendingSys, pendingMic) = managerLock.withLock {
             (systemManager, micManager, pendingSystemManager, pendingMicManager)
+        }
+
+        // DIAG: log every ~5s (100 flushes at 50ms)
+        flushCount += 1
+        if flushCount % 100 == 0 {
+            logger.error("flush #\(self.flushCount): sys=\(sysSamples.count) mic=\(micSamples.count) sysMgr=\(sysMgr != nil) micMgr=\(micMgr != nil)")
         }
 
         // Feed system audio to active + pending managers
@@ -325,8 +333,14 @@ final class LiveTranscriptStream: @unchecked Sendable {
 
     // MARK: - Transcription update handling
 
+    private var sysUpdateCount = 0
+
     private func handleUpdate(_ update: SlidingWindowTranscriptionUpdate, source: String) {
         let timings = update.tokenTimings
+        if source == "sys" {
+            sysUpdateCount += 1
+            logger.error("sys update #\(self.sysUpdateCount): timings=\(timings.count) text=\(update.text.prefix(60))")
+        }
         guard !timings.isEmpty else { return }
 
         updateLock.withLock {

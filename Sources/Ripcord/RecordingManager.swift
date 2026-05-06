@@ -505,6 +505,7 @@ final class RecordingManager: @unchecked Sendable {
 
     func startRecording() {
         guard state == .buffering else { return }
+        logger.error("Recording started")
 
         let timestamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -613,6 +614,7 @@ final class RecordingManager: @unchecked Sendable {
 
     func stopRecording() {
         guard state == .recording || state == .paused else { return }
+        logger.error("Recording stopping")
 
         if autoLiveTranscript && liveTranscriptEnabled {
             Task { await setLiveTranscriptEnabled(false) }
@@ -711,6 +713,7 @@ final class RecordingManager: @unchecked Sendable {
         // Update state based on result
         switch result {
         case .success(let info):
+            logger.error("Recording stopped: \(info.url.lastPathComponent) (\(info.formattedDuration), \(info.formattedSize))")
             recentRecordings.removeAll { $0.url == info.url }
             recentRecordings.insert(info, at: 0)
             if recentRecordings.count > 10 { recentRecordings.removeLast() }
@@ -720,6 +723,7 @@ final class RecordingManager: @unchecked Sendable {
                 transcribeRecording(info)
             }
         case .failure(let error):
+            logger.error("Recording failed: \(error.localizedDescription)")
             state = .error("Recording failed: \(error.localizedDescription)")
         case .none:
             state = .buffering
@@ -728,6 +732,7 @@ final class RecordingManager: @unchecked Sendable {
 
     func pauseRecording() {
         guard state == .recording else { return }
+        logger.error("Recording paused")
 
         // Stop accumulating samples for recording
         pendingLock.lock()
@@ -762,6 +767,7 @@ final class RecordingManager: @unchecked Sendable {
 
     func resumeRecording() {
         guard state == .paused else { return }
+        logger.error("Recording resumed")
 
         // Accumulate paused duration
         if let pauseStart = pauseStartTime {
@@ -1074,6 +1080,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func shutdown() {
+        logger.error("Shutdown (state: \(String(describing: self.state)))")
         if state == .recording || state == .paused {
             stopRecording()
         }
