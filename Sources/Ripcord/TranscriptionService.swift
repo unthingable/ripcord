@@ -298,10 +298,14 @@ final class TranscriptionService: @unchecked Sendable {
     /// Picks randomly from the top 3 longest segments, offset to avoid boundary bleed.
     func randomSegmentRange(for speakerID: String, fileURL: URL) -> (start: Double, end: Double)? {
         // Use in-memory results if available, otherwise fall back to loaded sidecar data.
-        // When in-memory results exist, filter out sparse-text segments (likely silence).
+        // When in-memory results exist, prefer segments with enough speech content,
+        // but fall back to any segment so the play button always works.
         let allSegments: [(start: Double, end: Double)]
         if let saved = lastResults[fileURL] {
-            allSegments = saved.result.segments
+            let speakerSegments = saved.result.segments
+                .filter { $0.speaker == speakerID }
+                .map { ($0.start, $0.end) }
+            let preferred = saved.result.segments
                 .filter { $0.speaker == speakerID }
                 .filter { seg in
                     let duration = seg.end - seg.start
@@ -310,11 +314,14 @@ final class TranscriptionService: @unchecked Sendable {
                     return wordCount >= 3
                 }
                 .map { ($0.start, $0.end) }
+            allSegments = preferred.isEmpty ? speakerSegments : preferred
         } else if let loaded = loadedSegments[fileURL] {
-            allSegments = loaded
-                .filter { $0.speaker == speakerID }
+            let matching = loaded.filter { $0.speaker == speakerID }
+            let preferred = matching
                 .filter { ($0.end - $0.start) >= 2.0 }
                 .map { ($0.start, $0.end) }
+            let all = matching.map { ($0.start, $0.end) }
+            allSegments = preferred.isEmpty ? all : preferred
         } else {
             return nil
         }
