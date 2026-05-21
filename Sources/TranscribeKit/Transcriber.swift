@@ -197,7 +197,7 @@ public final class Transcriber: @unchecked Sendable {
             break
         }
 
-        diarizerConfig.embedding.minSegmentDurationSeconds = config.minSegmentDuration ?? 0.1
+        diarizerConfig.embedding.minSegmentDurationSeconds = config.minSegmentDuration ?? 0.5
         if let g = config.minGapDuration {
             diarizerConfig.postProcessing.minGapDurationSeconds = g
         }

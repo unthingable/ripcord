@@ -168,7 +168,7 @@ struct TranscribeCLI: AsyncParsableCommand {
             configParts.append("speakers: \(speakers)")
             configParts.append("sensitivity: \(sensitivity ?? 0.75)")
             configParts.append("speech: \(speechThreshold ?? 0.5)")
-            configParts.append("min-seg: \(minSegment ?? 0.1)s")
+            configParts.append("min-seg: \(minSegment ?? 0.5)s")
             configParts.append("min-gap: \(minGap ?? 0.0)s")
             if removeFillers { configParts.append("fillers removed") }
         }

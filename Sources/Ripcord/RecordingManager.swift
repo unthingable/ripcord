@@ -84,7 +84,7 @@ struct TranscriptionConfig: Equatable {
     var removeFillerWords: Bool = false
     var diarizationQuality: DiarizationQuality = .balanced
     var speechThreshold: Double = 0.5
-    var minSegmentDuration: Double = 0.1
+    var minSegmentDuration: Double = 0.5
     var minGapDuration: Double = 0.0
 }
 
