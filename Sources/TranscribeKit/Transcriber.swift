@@ -1,6 +1,7 @@
 @preconcurrency import AVFoundation
 import FluidAudio
 import Foundation
+import os
 
 public final class Transcriber: @unchecked Sendable {
     private let lock = NSLock()
@@ -109,6 +110,14 @@ public final class Transcriber: @unchecked Sendable {
             case .sortformer:
                 diarizationResult = try await diarizeWithSortformer(fileURL: processURL)
             }
+        }
+
+        try Task.checkCancellation()
+
+        // Speaker re-verification: check segment embeddings against speaker profiles
+        if let dia = diarizationResult {
+            diarizationResult = try await verifySpeakerAssignments(
+                dia, fileURL: processURL)
         }
 
         try Task.checkCancellation()
@@ -277,6 +286,133 @@ public final class Transcriber: @unchecked Sendable {
 
         diarizerManager.cleanup()
         return speakerDB
+    }
+
+    // MARK: - Speaker Re-Verification
+
+    /// Re-verify diarization speaker assignments by extracting fresh embeddings for each segment
+    /// and comparing against speaker profiles built from the longest, highest-confidence segments.
+    ///
+    /// The offline diarizer's VBx clustering operates globally and can misassign segments,
+    /// especially near turn boundaries or during rapid speaker exchanges. This pass extracts
+    /// WeSpeaker embeddings at segment granularity and flips assignments where the embedding
+    /// clearly matches a different speaker's profile.
+    private func verifySpeakerAssignments(
+        _ result: DiarizationResult,
+        fileURL: URL
+    ) async throws -> DiarizationResult {
+        let segments = result.segments
+        let speakerIds = Array(Set(segments.map(\.speakerId)).sorted())
+        guard speakerIds.count >= 2 else { return result }
+
+        let models = try await DiarizerModels.download()
+        let diarizerManager = DiarizerManager()
+        diarizerManager.initialize(models: models)
+        defer { diarizerManager.cleanup() }
+
+        let converter = AudioConverter(sampleRate: 16000)
+        let audio16k = try converter.resampleAudioFile(fileURL)
+
+        let minSamples = 8000  // 0.5s minimum for reliable embedding
+        let profileMaxSamples = 160_000  // 10s for speaker profiles
+
+        // Step 1: Extract embeddings for all segments that are long enough
+        struct SegmentEmbedding {
+            let index: Int
+            let embedding: [Float]
+            let duration: Float
+        }
+
+        var segEmbeddings: [SegmentEmbedding] = []
+        for (idx, seg) in segments.enumerated() {
+            let startSample = max(0, Int(Double(seg.startTimeSeconds) * 16000))
+            let endSample = min(audio16k.count, Int(Double(seg.endTimeSeconds) * 16000))
+            guard endSample - startSample >= minSamples else { continue }
+
+            let slice = Array(audio16k[startSample..<endSample])
+            let embedding = try diarizerManager.extractSpeakerEmbedding(from: slice)
+            segEmbeddings.append(SegmentEmbedding(
+                index: idx, embedding: embedding, duration: seg.durationSeconds))
+        }
+
+        guard segEmbeddings.count >= 2 else { return result }
+
+        // Step 2: Build speaker profiles from the longest segments per speaker
+        var profiles: [String: [Float]] = [:]
+        for speakerId in speakerIds {
+            let speakerSegs = segEmbeddings
+                .filter { segments[$0.index].speakerId == speakerId }
+                .sorted { $0.duration > $1.duration }
+            guard !speakerSegs.isEmpty else { continue }
+
+            // Use top segments up to profileMaxSamples worth of audio
+            var totalDuration: Float = 0
+            var selectedEmbeddings: [([Float], Float)] = []
+            for se in speakerSegs {
+                guard totalDuration < Float(profileMaxSamples) / 16000.0 else { break }
+                selectedEmbeddings.append((se.embedding, se.duration))
+                totalDuration += se.duration
+            }
+
+            // Duration-weighted average embedding
+            let totalWeight = selectedEmbeddings.reduce(Float(0)) { $0 + $1.1 }
+            let dim = selectedEmbeddings[0].0.count
+            var centroid = [Float](repeating: 0, count: dim)
+            for (emb, dur) in selectedEmbeddings {
+                let w = dur / totalWeight
+                for i in 0..<dim { centroid[i] += emb[i] * w }
+            }
+            // L2 normalize
+            let norm = sqrt(centroid.reduce(Float(0)) { $0 + $1 * $1 })
+            if norm > 0 { centroid = centroid.map { $0 / norm } }
+            profiles[speakerId] = centroid
+        }
+
+        guard profiles.count >= 2 else { return result }
+
+        // Step 3: Re-verify each segment's assignment
+        var corrected = segments
+        var flips = 0
+        for se in segEmbeddings {
+            let seg = segments[se.index]
+            let assignedId = seg.speakerId
+
+            // Cosine similarity (embeddings are L2-normalized, so dot product = cosine sim)
+            var bestId = assignedId
+            var bestSim: Float = -1
+            var assignedSim: Float = -1
+
+            for (speakerId, profile) in profiles {
+                var sim: Float = 0
+                for i in 0..<se.embedding.count {
+                    sim += se.embedding[i] * profile[i]
+                }
+                if speakerId == assignedId { assignedSim = sim }
+                if sim > bestSim {
+                    bestSim = sim
+                    bestId = speakerId
+                }
+            }
+
+            // Flip if a different speaker is clearly better
+            let margin = bestSim - assignedSim
+            if bestId != assignedId && margin > 0.20 {
+                corrected[se.index] = TimedSpeakerSegment(
+                    speakerId: bestId,
+                    embedding: seg.embedding,
+                    startTimeSeconds: seg.startTimeSeconds,
+                    endTimeSeconds: seg.endTimeSeconds,
+                    qualityScore: seg.qualityScore)
+                flips += 1
+            }
+        }
+
+        if flips > 0 {
+            os_log(.info, "Speaker re-verification: flipped %d/%d segments", flips, segEmbeddings.count)
+        }
+
+        return DiarizationResult(
+            segments: corrected, speakerDatabase: result.speakerDatabase)
     }
 
     // MARK: - Errors
