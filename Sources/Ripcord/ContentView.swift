@@ -1146,6 +1146,65 @@ struct DefaultMarkSlider: View {
     }
 }
 
+// MARK: - Speaker Count Picker
+
+struct SpeakerCountPicker: View {
+    @Binding var selection: Int
+    private let quickPicks: [Int] = [-1, 2, 3]
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Text("Speakers")
+                .font(.system(size: 11))
+            Spacer()
+            ForEach(quickPicks, id: \.self) { value in
+                quickButton(value: value, label: value == -1 ? "A" : "\(value)")
+            }
+            moreMenu
+        }
+        .controlSize(.small)
+    }
+
+    @ViewBuilder
+    private func quickButton(value: Int, label: String) -> some View {
+        let button = Button {
+            selection = value
+        } label: {
+            Text(label)
+                .font(.system(size: 11))
+                .frame(minWidth: 16)
+        }
+        if selection == value {
+            button.buttonStyle(.borderedProminent)
+        } else {
+            button.buttonStyle(.bordered)
+        }
+    }
+
+    private var moreMenu: some View {
+        Menu {
+            ForEach(4...10, id: \.self) { n in
+                Button("\(n) speakers") {
+                    selection = n
+                }
+            }
+        } label: {
+            Text(selection >= 4 ? "\(selection)" : "+")
+                .font(.system(size: 11))
+                .frame(minWidth: 16)
+                .foregroundStyle(selection >= 4 ? AnyShapeStyle(.white) : AnyShapeStyle(.primary))
+        }
+        .menuStyle(.borderlessButton)
+        .fixedSize()
+        .padding(.horizontal, 6)
+        .padding(.vertical, 3)
+        .background(
+            RoundedRectangle(cornerRadius: 5)
+                .fill(selection >= 4 ? Color.accentColor : Color(nsColor: .controlColor))
+        )
+    }
+}
+
 // MARK: - Transcription Config Form & Popover
 
 struct TranscriptionConfigForm: View {
@@ -1194,13 +1253,7 @@ struct TranscriptionConfigForm: View {
                 }
                 .controlSize(.small)
 
-                Picker("Speakers", selection: $config.expectedSpeakerCount) {
-                    Text("Auto").tag(-1)
-                    ForEach(2...10, id: \.self) { n in
-                        Text("\(n)").tag(n)
-                    }
-                }
-                .controlSize(.small)
+                SpeakerCountPicker(selection: $config.expectedSpeakerCount)
 
                 expandableHeader("Advanced", isExpanded: $advancedExpanded)
                     .controlSize(.small)
