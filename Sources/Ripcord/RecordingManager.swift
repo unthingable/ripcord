@@ -23,11 +23,35 @@ enum MicStatus: Equatable {
     case active
 }
 
+enum SystemMicMode: Equatable {
+    case unavailable
+    case standard
+    case wideSpectrum
+    case voiceIsolation
+    case unknown(Int)
+
+    var label: String {
+        switch self {
+        case .unavailable: "Unavailable"
+        case .standard: "Standard"
+        case .wideSpectrum: "Wide Spectrum"
+        case .voiceIsolation: "Voice Isolation"
+        case .unknown(let raw): "Unknown (\(raw))"
+        }
+    }
+
+    var isVoiceIsolation: Bool {
+        self == .voiceIsolation
+    }
+}
+
 enum SettingsKey {
     static let bufferDuration = "ripcord.bufferDurationSeconds"
     static let outputFormat   = "ripcord.outputFormat"
     static let audioQuality   = "ripcord.audioQuality"
     static let micEnabled     = "ripcord.micEnabled"
+    static let systemCaptureEnabled = "ripcord.systemCaptureEnabled"
+    static let nativeMicDebugEnabled = "ripcord.nativeMicDebugEnabled"
     static let channelSplit   = "ripcord.channelSplit"
     static let outputDirectory = "ripcord.outputDirectory"
     static let captureDuration = "ripcord.captureDurationSeconds"
@@ -97,11 +121,14 @@ final class RecordingManager: @unchecked Sendable {
     var outputFormat: AudioOutputFormat = .wav
     var audioQuality: AudioQuality = .medium
     var micEnabled: Bool = true
+    var systemCaptureEnabled: Bool = true
+    var nativeMicDebugEnabled: Bool = false
     var channelSplit: Bool = true
     var outputDirectory: URL
     var recentRecordings: [RecordingInfo] = []  // newest first, capped at 10
     var recordingElapsed: TimeInterval = 0
     var micStatus: MicStatus = .off
+    var systemMicMode: SystemMicMode = .unavailable
     var waveformAmplitudes: [Float] = Array(repeating: 0, count: 100)
     var waveformBarStates: [BarState] = Array(repeating: .idle, count: 100)
     var filledBarCount: Int = 1
@@ -131,6 +158,16 @@ final class RecordingManager: @unchecked Sendable {
 
     private let systemCapture = SystemAudioCapture()
     private let micCapture = MicrophoneCapture()
+    private let micChannelModeStore = MicChannelModeStore()
+    private let micGainStore = MicGainStore()
+
+    // CoreAudio callbacks write into these pre-allocated handoffs. A normal
+    // queue drains them and performs buffering, waveform, recording, and live
+    // transcript work so the real-time threads do not take app-level locks.
+    private let systemSampleHandoff = AudioSampleHandoff(capacityFrames: AudioConstants.sampleRateInt * 2)
+    private let micSampleHandoff = AudioSampleHandoff(capacityFrames: AudioConstants.sampleRateInt * 2)
+    private let audioProcessingQueue = DispatchQueue(label: "com.vibe.ripcord.audiohandoff", qos: .userInitiated)
+    private var audioProcessingTimer: DispatchSourceTimer?
 
     // Dual circular buffers for proper mixing
     private var systemBuffer: CircularAudioBuffer
@@ -212,6 +249,7 @@ final class RecordingManager: @unchecked Sendable {
             SettingsKey.outputFormat: AudioOutputFormat.wav.rawValue,
             SettingsKey.audioQuality: AudioQuality.medium.rawValue,
             SettingsKey.micEnabled: true,
+            SettingsKey.systemCaptureEnabled: true,
             SettingsKey.channelSplit: true,
             SettingsKey.outputDirectory: defaultDir.path,
             SettingsKey.launchAtLogin: false,
@@ -254,6 +292,8 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         micEnabled = defaults.bool(forKey: SettingsKey.micEnabled)
+        systemCaptureEnabled = defaults.bool(forKey: SettingsKey.systemCaptureEnabled)
+        nativeMicDebugEnabled = defaults.bool(forKey: SettingsKey.nativeMicDebugEnabled)
         channelSplit = defaults.bool(forKey: SettingsKey.channelSplit)
         selectedMicUID = defaults.string(forKey: SettingsKey.selectedMicUID)
         transcriptionEnabled = defaults.bool(forKey: SettingsKey.enableTranscription)
@@ -326,7 +366,9 @@ final class RecordingManager: @unchecked Sendable {
         let savedThresh = defaults.double(forKey: SettingsKey.liveTranscriptConfirmThreshold)
         liveTranscriptConfirmThreshold = savedThresh > 0 ? savedThresh : 0.65
 
+        refreshSystemMicMode()
         installSignalHandlers()
+        startAudioProcessingTimer()
     }
 
     private func installSignalHandlers() {
@@ -343,6 +385,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     deinit {
+        audioProcessingTimer?.cancel()
         writeTimer?.cancel()
         elapsedTimer?.invalidate()
         waveformTimer?.invalidate()
@@ -376,10 +419,10 @@ final class RecordingManager: @unchecked Sendable {
 
         // Set up audio callbacks
         systemCapture.onSamples = { [weak self] samples in
-            self?.handleSystemSamples(samples)
+            self?.systemSampleHandoff.write(samples)
         }
         micCapture.onSamples = { [weak self] samples in
-            self?.handleMicSamples(samples)
+            self?.micSampleHandoff.write(samples)
         }
 
         // Coordinate mic AUHAL with system capture restarts.
@@ -406,14 +449,18 @@ final class RecordingManager: @unchecked Sendable {
             await self.startMic()
         }
 
-        // Start system audio capture
-        do {
-            try await systemCapture.start()
-        } catch {
-            await MainActor.run {
-                self.state = .error("System audio: \(error.localizedDescription)")
+        let wantsSystemCapture = await MainActor.run { systemCaptureEnabled }
+        if wantsSystemCapture {
+            do {
+                try await systemCapture.start()
+            } catch {
+                await MainActor.run {
+                    self.state = .error("System audio: \(error.localizedDescription)")
+                }
+                return
             }
-            return
+        } else {
+            logger.error("System audio capture disabled by \(SettingsKey.systemCaptureEnabled, privacy: .public)")
         }
 
         // Start mic capture if enabled and permission was granted
@@ -524,6 +571,10 @@ final class RecordingManager: @unchecked Sendable {
     func startRecording() {
         guard state == .buffering else { return }
         logger.error("Recording started")
+        refreshSystemMicMode()
+        if systemMicMode.isVoiceIsolation {
+            logger.error("Recording while macOS Mic Mode is Voice Isolation; non-voice USB inputs may be attenuated")
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -557,10 +608,21 @@ final class RecordingManager: @unchecked Sendable {
             return
         }
 
+        if nativeMicDebugEnabled {
+            let nativeDebugURL = fileURL
+                .deletingPathExtension()
+                .appendingPathExtension("native.wav")
+            do {
+                try micCapture.startNativeDebugRecording(url: nativeDebugURL)
+            } catch {
+                logger.error("Native mic debug recording could not start: \(error.localizedDescription)")
+            }
+        }
+
         // Read back-record audio from circular buffers (read without drain — waveform stays continuous)
-        let captureSamples = captureDurationSeconds * AudioConstants.sampleRateInt
-        let systemSamples = systemBuffer.read(lastNSamples: captureSamples)
-        let micSamples = micBuffer.read(lastNSamples: captureSamples)
+        let captureFrames = captureDurationSeconds * AudioConstants.sampleRateInt
+        let systemSamples = systemBuffer.read(lastNFrames: captureFrames)
+        let micSamples = micBuffer.read(lastNFrames: captureFrames)
 
         // Mark back-record bars as recorded and set state for new bars
         let barsInCapture = min(100, captureDurationSeconds * 100 / max(1, bufferDurationSeconds))
@@ -663,6 +725,10 @@ final class RecordingManager: @unchecked Sendable {
         pendingSystemSamples.removeAll()
         pendingMicSamples.removeAll()
         pendingLock.unlock()
+
+        if nativeMicDebugEnabled {
+            micCapture.stopNativeDebugRecording()
+        }
 
         // Flush remaining samples, cancel timer, and finalize writer on writeQueue
         var result: Result<RecordingInfo, Error>?
@@ -975,6 +1041,81 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
+    /// Returns the persisted channel mode for the currently selected mic
+    /// (or system default, identified by its current device ID's UID).
+    /// Returns nil when no mic is selected and no system default exists.
+    func currentMicChannelMode() -> MicChannelMode? {
+        guard let device = currentSelectedMicDevice() else { return nil }
+        return micChannelModeStore.mode(forUID: device.uid, channelCount: device.inputChannelCount)
+    }
+
+    /// Resolves the currently selected mic to an AudioInputDevice (the user's
+    /// pinned UID, or the system default if no pin).
+    func currentSelectedMicDevice() -> AudioInputDevice? {
+        let devices = deviceEnumerator.inputDevices
+        if let uid = selectedMicUID {
+            return devices.first(where: { $0.uid == uid })
+        }
+        if let defaultID = MicrophoneCapture.currentDefaultInputDeviceID() {
+            return devices.first(where: { $0.id == defaultID })
+        }
+        return nil
+    }
+
+    /// Persist channel mode for a specific device UID and restart mic if
+    /// it's the currently active device.
+    func updateMicChannelMode(_ mode: MicChannelMode, forUID uid: String) async {
+        micChannelModeStore.setMode(mode, forUID: uid)
+        let currentUID = currentSelectedMicDevice()?.uid
+        if currentUID == uid, micCapture.isRunning {
+            micCapture.stop()
+            await startMic()
+        }
+    }
+
+    /// Per-device input gain in dB. 0 = unity. USB instrument/line inputs
+    /// commonly need +20..+60 dB because they skip the mic-preamp stage that
+    /// audio interfaces apply before the ADC.
+    func currentMicGainDB() -> Double {
+        guard let device = currentSelectedMicDevice() else { return 0 }
+        return micGainStore.gainDB(forUID: device.uid)
+    }
+
+    /// Live-update gain without restarting capture if it's the active device.
+    func updateMicGainDB(_ dB: Double, forUID uid: String) {
+        micGainStore.setGainDB(dB, forUID: uid)
+        if currentSelectedMicDevice()?.uid == uid {
+            micCapture.setInputGain(dB: dB)
+        }
+    }
+
+    func refreshSystemMicMode() {
+        guard #available(macOS 12.0, *) else {
+            systemMicMode = .unavailable
+            return
+        }
+
+        let mode = AVCaptureDevice.activeMicrophoneMode
+        switch mode {
+        case .standard:
+            systemMicMode = .standard
+        case .wideSpectrum:
+            systemMicMode = .wideSpectrum
+        case .voiceIsolation:
+            systemMicMode = .voiceIsolation
+        @unknown default:
+            systemMicMode = .unknown(mode.rawValue)
+        }
+    }
+
+    func openSystemMicModePicker() {
+        guard #available(macOS 12.0, *) else { return }
+        AVCaptureDevice.showSystemUserInterface(.microphoneModes)
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0) { [weak self] in
+            self?.refreshSystemMicMode()
+        }
+    }
+
     func updateFilePrefix(_ prefix: String) {
         filePrefix = prefix
         UserDefaults.standard.set(prefix, forKey: SettingsKey.filePrefix)
@@ -1094,7 +1235,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     var bufferFillSeconds: Int {
-        max(systemBuffer.sampleCount, micBuffer.sampleCount) / AudioConstants.sampleRateInt
+        max(systemBuffer.frameCount, micBuffer.frameCount) / AudioConstants.sampleRateInt
     }
 
     private func updateFilledBarCount() {
@@ -1110,6 +1251,9 @@ final class RecordingManager: @unchecked Sendable {
             self.writeTimer?.cancel()
             self.writeTimer = nil
         }
+        if nativeMicDebugEnabled {
+            micCapture.stopNativeDebugRecording()
+        }
         elapsedTimer?.invalidate()
         elapsedTimer = nil
         waveformTimer?.invalidate()
@@ -1119,17 +1263,33 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     // MARK: - Stereo Packing
+    //
+    // Inputs `system` and `mic` are stereo-interleaved (2 floats per frame).
+    // Outputs are 2-ch stereo-interleaved suitable for AudioFileWriter.
+    //
+    // - Split mode: each source downmixed to mono; sys → L, mic → R.
+    // - Mixed mode: each source's L/R preserved; sum sysL+micL → L, sysR+micR → R.
 
-    /// Split mode: system audio in left channel, mic in right channel.
+    private static let ch = CircularAudioBuffer.channelsPerFrame
+
+    /// Split mode: downmix each source to mono, then route sys→L, mic→R.
     static func interleave(_ system: [Float], _ mic: [Float]) -> [Float] {
-        let len = max(system.count, mic.count)
-        guard len > 0 else { return [] }
-        return [Float](unsafeUninitializedCapacity: len * 2) { buffer, count in
-            for i in 0..<len {
-                buffer[i * 2]     = i < system.count ? system[i] : 0  // L
-                buffer[i * 2 + 1] = i < mic.count    ? mic[i]    : 0  // R
+        let sysFrames = system.count / ch
+        let micFrames = mic.count / ch
+        let frames = max(sysFrames, micFrames)
+        guard frames > 0 else { return [] }
+        return [Float](unsafeUninitializedCapacity: frames * 2) { buffer, count in
+            for f in 0..<frames {
+                let sysMono: Float = f < sysFrames
+                    ? (system[f * ch] + system[f * ch + 1]) * 0.5
+                    : 0
+                let micMono: Float = f < micFrames
+                    ? (mic[f * ch] + mic[f * ch + 1]) * 0.5
+                    : 0
+                buffer[f * 2]     = sysMono  // L
+                buffer[f * 2 + 1] = micMono  // R
             }
-            count = len * 2
+            count = frames * 2
         }
     }
 
@@ -1140,19 +1300,22 @@ final class RecordingManager: @unchecked Sendable {
             : Self.mixStereo(system, mic)
     }
 
-    /// Mixed mode: both sources summed into both channels.
+    /// Mixed mode: preserve stereo per source, sum L+L and R+R per frame.
     static func mixStereo(_ system: [Float], _ mic: [Float]) -> [Float] {
-        let len = max(system.count, mic.count)
-        guard len > 0 else { return [] }
-        return [Float](unsafeUninitializedCapacity: len * 2) { buffer, count in
-            for i in 0..<len {
-                let sys: Float = i < system.count ? system[i] : 0
-                let m: Float = i < mic.count ? mic[i] : 0
-                let mixed = sys + m
-                buffer[i * 2]     = mixed
-                buffer[i * 2 + 1] = mixed
+        let sysFrames = system.count / ch
+        let micFrames = mic.count / ch
+        let frames = max(sysFrames, micFrames)
+        guard frames > 0 else { return [] }
+        return [Float](unsafeUninitializedCapacity: frames * 2) { buffer, count in
+            for f in 0..<frames {
+                let sysL: Float = f < sysFrames ? system[f * ch]     : 0
+                let sysR: Float = f < sysFrames ? system[f * ch + 1] : 0
+                let micL: Float = f < micFrames ? mic[f * ch]        : 0
+                let micR: Float = f < micFrames ? mic[f * ch + 1]    : 0
+                buffer[f * 2]     = sysL + micL
+                buffer[f * 2 + 1] = sysR + micR
             }
-            count = len * 2
+            count = frames * 2
         }
     }
 
@@ -1345,38 +1508,61 @@ final class RecordingManager: @unchecked Sendable {
 
     // Audio always flows to circular buffers (continuous waveform); also to pending when recording.
 
-    private func handleSystemSamples(_ samples: [Float]) {
+    private func startAudioProcessingTimer() {
+        let timer = DispatchSource.makeTimerSource(queue: audioProcessingQueue)
+        timer.schedule(deadline: .now(), repeating: .milliseconds(10))
+        timer.setEventHandler { [weak self] in
+            self?.flushAudioHandoffs()
+        }
+        timer.resume()
+        audioProcessingTimer = timer
+    }
+
+    private func flushAudioHandoffs() {
+        let sysDrain = systemSampleHandoff.drain()
+        if sysDrain.droppedSamples > 0 {
+            logger.error("System audio handoff dropped \(sysDrain.droppedSamples) samples")
+        }
+        if !sysDrain.samples.isEmpty {
+            sysDrain.samples.withUnsafeBufferPointer { processSystemSamples($0) }
+        }
+
+        let micDrain = micSampleHandoff.drain()
+        if micDrain.droppedSamples > 0 {
+            logger.error("Mic audio handoff dropped \(micDrain.droppedSamples) samples")
+        }
+        if !micDrain.samples.isEmpty {
+            micDrain.samples.withUnsafeBufferPointer { processMicSamples($0) }
+        }
+    }
+
+    private func processSystemSamples(_ samples: UnsafeBufferPointer<Float>) {
         routeSamples(samples, peakAccum: &systemPeakAccum,
                      pendingArray: &pendingSystemSamples, buffer: systemBuffer)
         liveTranscriptLock.withLock { liveTranscriptStream }?.feedSystemAudio(samples)
     }
 
-    private func handleMicSamples(_ samples: [Float]) {
+    private func processMicSamples(_ samples: UnsafeBufferPointer<Float>) {
         routeSamples(samples, peakAccum: &micPeakAccum,
                      pendingArray: &pendingMicSamples, buffer: micBuffer)
         liveTranscriptLock.withLock { liveTranscriptStream }?.feedMicAudio(samples)
     }
 
-    /// Routes incoming audio to the circular buffer (always) and pending recording array (when active).
-    private func routeSamples(_ samples: [Float], peakAccum: inout Float,
+    private func routeSamples(_ samples: UnsafeBufferPointer<Float>, peakAccum: inout Float,
                               pendingArray: inout [Float], buffer: CircularAudioBuffer) {
         var peak: Float = 0
-        for s in samples {
-            let a = abs(s)
+        for i in 0..<samples.count {
+            let a = abs(samples[i])
             if a > peak { peak = a }
         }
         meterLock.lock()
         if peak > peakAccum { peakAccum = peak }
         meterLock.unlock()
 
-        // Feed shared waveform tracker — bar commits are wall-clock driven, so
-        // both sources contribute to one synchronized timeline.
         waveformTracker.feedPeak(peak)
 
-        // Always write to circular buffer (continuous waveform)
         buffer.write(samples)
 
-        // Also accumulate for recording when active
         pendingLock.lock()
         if pendingActive {
             pendingArray.append(contentsOf: samples)
@@ -1415,10 +1601,12 @@ final class RecordingManager: @unchecked Sendable {
             }
         }
 
-        // Silence detection: use the already-computed peak amplitude
+        // Silence detection: use the already-computed peak amplitude.
+        // silenceSampleThreshold and silenceSampleCount are counted in frames;
+        // sys/mic are stereo-interleaved, so divide their sample count by 2.
         if silenceEnabled {
             if flushPeak < silenceThresholdLocal {
-                silenceSampleCount += max(sys.count, mic.count)
+                silenceSampleCount += max(sys.count, mic.count) / CircularAudioBuffer.channelsPerFrame
                 if silenceSampleCount >= silenceSampleThreshold {
                     if !silenceDetected {
                         silenceDetected = true
@@ -1443,28 +1631,32 @@ final class RecordingManager: @unchecked Sendable {
 
         guard let w = writer, writeError == nil else { return }
 
-        let sysCount = sys.count
-        let micCount = mic.count
+        // sys and mic are stereo-interleaved (2 floats per frame). Align prefix
+        // lengths to frame boundaries so we never split a frame across cycles.
+        let ch = CircularAudioBuffer.channelsPerFrame
+        let sysFrames = sys.count / ch
+        let micFrames = mic.count / ch
 
         let stereo: [Float]
-        if sysCount > 0 && micCount > 0 {
-            // Both sources have data — interleave min(), carry forward the tail
-            let len = min(sysCount, micCount)
-            stereo = packStereo(Array(sys.prefix(len)), Array(mic.prefix(len)))
-            if sysCount > len {
-                systemRemainder = Array(sys.suffix(sysCount - len))
+        if sysFrames > 0 && micFrames > 0 {
+            // Both sources have data — pack min(), carry forward the tail
+            let lenFrames = min(sysFrames, micFrames)
+            let lenSamples = lenFrames * ch
+            stereo = packStereo(Array(sys.prefix(lenSamples)), Array(mic.prefix(lenSamples)))
+            if sysFrames > lenFrames {
+                systemRemainder = Array(sys.suffix(sys.count - lenSamples))
             }
-            if micCount > len {
-                micRemainder = Array(mic.suffix(micCount - len))
+            if micFrames > lenFrames {
+                micRemainder = Array(mic.suffix(mic.count - lenSamples))
             }
-        } else if sysCount == 0 && micCount == 0 {
+        } else if sysFrames == 0 && micFrames == 0 {
             // Nothing to write
             return
-        } else if sysCount == 0 && micCount <= Self.remainderCap {
+        } else if sysFrames == 0 && micFrames <= Self.remainderCap {
             // Mic has data but system doesn't yet — carry forward, wait for next cycle
             micRemainder = mic
             return
-        } else if micCount == 0 && sysCount <= Self.remainderCap {
+        } else if micFrames == 0 && sysFrames <= Self.remainderCap {
             // System has data but mic doesn't yet — carry forward, wait for next cycle
             systemRemainder = sys
             return
@@ -1532,7 +1724,9 @@ final class RecordingManager: @unchecked Sendable {
         }
         do {
             let resolvedID = selectedMicUID.flatMap { deviceEnumerator.deviceID(forUID: $0) }
-            try micCapture.start(deviceID: resolvedID)
+            let mode = currentMicChannelMode() ?? .monoDevice
+            let gainDB = currentMicGainDB()
+            try micCapture.start(deviceID: resolvedID, channelMode: mode, gainDB: gainDB)
             await MainActor.run {
                 self.micStatus = .active
             }

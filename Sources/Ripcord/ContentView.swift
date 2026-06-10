@@ -32,6 +32,7 @@ struct ContentView: View {
             }
             .onAppear {
                 setupGlobalHotkey()
+                manager.refreshSystemMicMode()
             }
     }
 
@@ -62,6 +63,7 @@ struct ContentView: View {
             configSummary
 
             micRow
+            micModeWarning
 
             // Recent recordings
             if !manager.recentRecordings.isEmpty {
@@ -521,6 +523,64 @@ struct ContentView: View {
             .font(.caption)
     }
 
+    // MARK: - Per-device input gain (dB)
+
+    @ViewBuilder
+    private func inputGainField(for device: AudioInputDevice) -> some View {
+        InputGainField(manager: manager, device: device)
+    }
+
+    // MARK: - Channel-mode picker (multi-channel mic devices)
+
+    @ViewBuilder
+    private func channelModePicker(for device: AudioInputDevice) -> some View {
+        let mode = manager.currentMicChannelMode() ?? .defaultForMultiChannel
+        let chipLabel: String = {
+            switch mode {
+            case .stereo:               return "1/2"
+            case .mono(let ch):         return "M\(ch)"
+            }
+        }()
+
+        Menu {
+            Button {
+                Task { await manager.updateMicChannelMode(.stereo, forUID: device.uid) }
+            } label: {
+                if mode == .stereo {
+                    Label("Stereo (1/2)", systemImage: "checkmark")
+                } else {
+                    Text("Stereo (1/2)")
+                }
+            }
+            Divider()
+            ForEach(1...device.inputChannelCount, id: \.self) { ch in
+                Button {
+                    Task { await manager.updateMicChannelMode(.mono(channel: ch), forUID: device.uid) }
+                } label: {
+                    if mode == .mono(channel: ch) {
+                        Label("Mono (\(ch))", systemImage: "checkmark")
+                    } else {
+                        Text("Mono (\(ch))")
+                    }
+                }
+            }
+        } label: {
+            Text(chipLabel)
+                .font(.caption2.weight(.medium))
+                .padding(.horizontal, 5)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.secondary.opacity(0.15))
+                )
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .fixedSize()
+        .help("Mic input channels: stereo pair, or single channel as mono.")
+        .opacity(manager.micEnabled ? 1 : 0.4)
+    }
+
     // MARK: - Mic Row (toggle + device picker)
 
     @ViewBuilder
@@ -583,6 +643,20 @@ struct ContentView: View {
             .menuStyle(.borderlessButton)
             .fixedSize(horizontal: false, vertical: true)
             .opacity(manager.micEnabled ? 1 : 0.4)
+
+            // Channel-mode picker: only visible when the selected device exposes
+            // more than one input channel. For a single-channel device there's
+            // nothing to choose.
+            if let device = manager.currentSelectedMicDevice(),
+               device.inputChannelCount > 1 {
+                channelModePicker(for: device)
+            }
+
+            // Per-device input gain (dB). USB instrument/line inputs commonly
+            // need +20..+60 dB to reach normal recording levels.
+            if let device = manager.currentSelectedMicDevice() {
+                inputGainField(for: device)
+            }
 
             VStack(spacing: 2) {
                 Image(systemName: "mic")
@@ -650,6 +724,31 @@ struct ContentView: View {
                 .disabled(!manager.transcriptionService.modelsLoaded)
             }
             .help("Live Transcript")
+        }
+    }
+
+    @ViewBuilder
+    private var micModeWarning: some View {
+        if manager.micEnabled && manager.systemMicMode.isVoiceIsolation {
+            HStack(alignment: .center, spacing: 6) {
+                Image(systemName: "exclamationmark.triangle.fill")
+                    .foregroundStyle(.orange)
+                Text("Mic Mode: Voice Isolation")
+                    .font(.caption2.weight(.medium))
+                    .lineLimit(1)
+                Spacer(minLength: 4)
+                Button("Change") {
+                    manager.openSystemMicModePicker()
+                }
+                .font(.caption2)
+            }
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: 6)
+                    .fill(Color.orange.opacity(0.12))
+            )
+            .help("Voice Isolation can suppress USB instruments and other non-voice inputs. Use Standard or Wide Spectrum for raw audio.")
         }
     }
 
@@ -1304,6 +1403,80 @@ struct TranscriptionConfigForm: View {
             .contentShape(Rectangle())
         }
         .buttonStyle(.plain)
+    }
+}
+
+private struct InputGainField: View {
+    @Bindable var manager: RecordingManager
+    let device: AudioInputDevice
+
+    @State private var text: String = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 2) {
+            TextField("0", text: $text)
+                .textFieldStyle(.plain)
+                .multilineTextAlignment(.trailing)
+                .font(.caption2.weight(.medium))
+                .frame(width: 34)
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(Color.secondary.opacity(0.15))
+                )
+                .focused($focused)
+                .onSubmit(commit)
+                .onChange(of: focused) { _, isFocused in
+                    if isFocused {
+                        if text.isEmpty {
+                            text = Self.format(manager.currentMicGainDB())
+                        }
+                    } else {
+                        commit()
+                    }
+                }
+            Text("dB")
+                .font(.caption2)
+                .foregroundStyle(.secondary)
+        }
+        .help("Input gain. USB instrument/line inputs commonly need +20..+60 dB.")
+        .opacity(manager.micEnabled ? 1 : 0.4)
+        .onAppear { syncFromStore() }
+        .onChange(of: device.uid) { _, _ in syncFromStore() }
+        .onChange(of: manager.currentMicGainDB()) { _, _ in
+            if !focused {
+                syncFromStore()
+            }
+        }
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "-", trimmed != "+", trimmed != "." else {
+            syncFromStore()
+            return
+        }
+
+        guard let value = Double(trimmed) else {
+            syncFromStore()
+            return
+        }
+
+        manager.updateMicGainDB(value, forUID: device.uid)
+        syncFromStore()
+    }
+
+    private func syncFromStore() {
+        text = Self.format(manager.currentMicGainDB())
+    }
+
+    private static func format(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(format: "%.1f", value)
     }
 }
 

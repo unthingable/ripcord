@@ -29,10 +29,15 @@ final class LiveTranscriptStream: @unchecked Sendable {
     private var systemConsumerTask: Task<Void, Never>?
     private var micConsumerTask: Task<Void, Never>?
 
-    // Pending sample handoff from RT threads (mirrors RecordingManager's pattern)
+    // Pending sample handoff from RecordingManager's audio processing queue.
     private let pendingLock = NSLock()
     private var pendingSystemSamples: [Float] = []
     private var pendingMicSamples: [Float] = []
+
+    // Pre-allocated downmix buffers (stereo→mono). Accessed from
+    // RecordingManager's serial audio processing queue.
+    private var systemDownmixBuffer = [Float](repeating: 0, count: 4096)
+    private var micDownmixBuffer = [Float](repeating: 0, count: 4096)
 
     // Flush timer — drains pending samples and feeds ASR managers
     private var flushTimer: DispatchSourceTimer?
@@ -251,20 +256,33 @@ final class LiveTranscriptStream: @unchecked Sendable {
         logger.info("Live transcript stream stopped")
     }
 
-    // MARK: - Audio feeding (called from CoreAudio RT threads)
+    // MARK: - Audio feeding (called from RecordingManager's audio processing queue)
 
-    /// Called from RecordingManager.handleSystemSamples on the CoreAudio RT thread.
-    /// Only appends to a pending array behind a lock — no allocation, no actor calls.
-    func feedSystemAudio(_ samples: [Float]) {
+    func feedSystemAudio(_ samples: UnsafeBufferPointer<Float>) {
+        let frames = samples.count / 2
+        guard frames > 0 else { return }
+        if systemDownmixBuffer.count < frames {
+            systemDownmixBuffer = [Float](repeating: 0, count: frames)
+        }
+        for f in 0..<frames {
+            systemDownmixBuffer[f] = (samples[f * 2] + samples[f * 2 + 1]) * 0.5
+        }
         pendingLock.withLock {
-            pendingSystemSamples.append(contentsOf: samples)
+            pendingSystemSamples.append(contentsOf: systemDownmixBuffer[..<frames])
         }
     }
 
-    /// Called from RecordingManager.handleMicSamples on the CoreAudio RT thread.
-    func feedMicAudio(_ samples: [Float]) {
+    func feedMicAudio(_ samples: UnsafeBufferPointer<Float>) {
+        let frames = samples.count / 2
+        guard frames > 0 else { return }
+        if micDownmixBuffer.count < frames {
+            micDownmixBuffer = [Float](repeating: 0, count: frames)
+        }
+        for f in 0..<frames {
+            micDownmixBuffer[f] = (samples[f * 2] + samples[f * 2 + 1]) * 0.5
+        }
         pendingLock.withLock {
-            pendingMicSamples.append(contentsOf: samples)
+            pendingMicSamples.append(contentsOf: micDownmixBuffer[..<frames])
         }
     }
 

@@ -8,7 +8,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.vibe.ripcord.systemaudio")
     deinit { stop() }
 
-    var onSamples: (([Float]) -> Void)?
+    var onSamples: ((UnsafeBufferPointer<Float>) -> Void)?
 
     /// Called before and after route-change restart so the owner can cycle
     /// other audio inputs (e.g. mic AUHAL) and avoid IOState escalation.
@@ -34,8 +34,10 @@ final class SystemAudioCapture: @unchecked Sendable {
     private var restartWorkItem: DispatchWorkItem?
     private var restartTask: Task<Void, Never>?
 
-    // Pre-allocated buffers for handleIOBlock (accessed only on serial queue)
-    private var monoBuffer = [Float](repeating: 0, count: 8192)
+    // Pre-allocated buffers for handleIOBlock (accessed only on serial queue).
+    // stereoBuffer: stereo-interleaved at tap rate (after channel projection)
+    // resampleOutputBuffer: stereo-interleaved at 48 kHz (after resampling)
+    private var stereoBuffer = [Float](repeating: 0, count: 16384)
     private var resampleOutputBuffer = [Float](repeating: 0, count: 16384)
 
     func start() async throws {
@@ -43,8 +45,9 @@ final class SystemAudioCapture: @unchecked Sendable {
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myObjectID = try translatePIDToProcessObject(myPID)
 
-        // Create a mono global tap that captures ALL system audio except our process
-        let tapDescription = CATapDescription(monoGlobalTapButExcludeProcesses: [myObjectID])
+        // Capture system audio as stereo. Recording split mode downmixes later;
+        // mixed mode preserves incoming L/R.
+        let tapDescription = CATapDescription(stereoGlobalTapButExcludeProcesses: [myObjectID])
         tapDescription.name = "Ripcord System Audio Tap"
         tapDescription.uuid = UUID()
         tapDescription.muteBehavior = .unmuted
@@ -244,7 +247,9 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     // MARK: - I/O Block Handler
 
-    private func handleIOBlock(inputData: UnsafePointer<AudioBufferList>, callback: (([Float]) -> Void)?) {
+    private var ioBlockCount = 0
+
+    private func handleIOBlock(inputData: UnsafePointer<AudioBufferList>, callback: ((UnsafeBufferPointer<Float>) -> Void)?) {
         let bufferList = inputData.pointee
         let buf = bufferList.mBuffers
 
@@ -254,61 +259,73 @@ final class SystemAudioCapture: @unchecked Sendable {
         guard floatCount > 0 else { return }
 
         let floatPtr = data.assumingMemoryBound(to: Float.self)
-        let channelCount = Int(buf.mNumberChannels)
+        let channelCount = max(1, Int(buf.mNumberChannels))
+        let frameCount = floatCount / channelCount
+        guard frameCount > 0 else { return }
 
-        let samples: [Float]
+        // Project tap audio onto stereo-interleaved: mono → duplicated L=R;
+        // stereo → pass-through; >2 channels → take first two (front L/R of
+        // typical surround layouts). We don't trust CoreAudio's downmix policy
+        // for the same reasons MicrophoneCapture handles channels itself.
+        let stereoSize = frameCount * 2
+        if stereoBuffer.count < stereoSize {
+            stereoBuffer = [Float](repeating: 0, count: stereoSize)
+        }
         if channelCount == 1 {
-            samples = Array(UnsafeBufferPointer(start: floatPtr, count: floatCount))
+            for f in 0..<frameCount {
+                let s = floatPtr[f]
+                stereoBuffer[f * 2]     = s
+                stereoBuffer[f * 2 + 1] = s
+            }
         } else {
-            // Mix down to mono
-            let frameCount = floatCount / channelCount
-            let scale = 1.0 / Float(channelCount)
-
-            // Grow buffer if needed
-            if monoBuffer.count < frameCount {
-                monoBuffer = [Float](repeating: 0, count: frameCount)
+            for f in 0..<frameCount {
+                let base = f * channelCount
+                stereoBuffer[f * 2]     = floatPtr[base]
+                stereoBuffer[f * 2 + 1] = floatPtr[base + 1]
             }
-
-            for i in 0..<frameCount {
-                var sum: Float = 0
-                for ch in 0..<channelCount {
-                    sum += floatPtr[i * channelCount + ch]
-                }
-                monoBuffer[i] = sum * scale
+        }
+        ioBlockCount += 1
+        if ioBlockCount == 1 || ioBlockCount % 500 == 0 {
+            var peak: Float = 0
+            for i in 0..<stereoSize {
+                let a = abs(stereoBuffer[i])
+                if a > peak { peak = a }
             }
-            // Create array for consumer
-            samples = Array(monoBuffer.prefix(frameCount))
+            logger.error("IOBlock #\(self.ioBlockCount) frames=\(frameCount) ch=\(channelCount) peak=\(peak) converter=\(self.converter != nil)")
         }
 
-        // Resample if needed, then deliver
         if converter != nil {
-            if let resampled = resample(samples) {
-                callback?(resampled)
+            if let resampledCount = resample(frameCount: frameCount) {
+                resampleOutputBuffer.withUnsafeBufferPointer { ptr in
+                    callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount))
+                }
             }
         } else {
-            callback?(samples)
+            stereoBuffer.withUnsafeBufferPointer { ptr in
+                callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize))
+            }
         }
     }
 
     // MARK: - Resampling
 
-    private static func monoFloat32ASBD(sampleRate: Double) -> AudioStreamBasicDescription {
+    private static func stereoFloat32InterleavedASBD(sampleRate: Double) -> AudioStreamBasicDescription {
         AudioStreamBasicDescription(
             mSampleRate: sampleRate,
             mFormatID: kAudioFormatLinearPCM,
             mFormatFlags: kAudioFormatFlagIsFloat | kAudioFormatFlagIsPacked,
-            mBytesPerPacket: 4,
+            mBytesPerPacket: 8,
             mFramesPerPacket: 1,
-            mBytesPerFrame: 4,
-            mChannelsPerFrame: 1,
+            mBytesPerFrame: 8,
+            mChannelsPerFrame: 2,
             mBitsPerChannel: 32,
             mReserved: 0
         )
     }
 
     private func setupResampler(sourceFormat: AudioStreamBasicDescription) throws {
-        var inputFormat = Self.monoFloat32ASBD(sampleRate: sourceFormat.mSampleRate)
-        var outputFormat = Self.monoFloat32ASBD(sampleRate: AudioConstants.sampleRate)
+        var inputFormat = Self.stereoFloat32InterleavedASBD(sampleRate: sourceFormat.mSampleRate)
+        var outputFormat = Self.stereoFloat32InterleavedASBD(sampleRate: AudioConstants.sampleRate)
 
         var conv: AudioConverterRef?
         let err = AudioConverterNew(&inputFormat, &outputFormat, &conv)
@@ -322,36 +339,41 @@ final class SystemAudioCapture: @unchecked Sendable {
     // consumed.  Must not collide with a real OSStatus error.
     private static let kNoMoreData: OSStatus = 1
 
-    private func resample(_ input: [Float]) -> [Float]? {
+    /// Resample stereo-interleaved data in `stereoBuffer` (frameCount frames)
+    /// from the tap's native rate to 48 kHz. Writes output to
+    /// `resampleOutputBuffer`. Returns sample count (stereo), or nil on error.
+    private func resample(frameCount: Int) -> Int? {
         guard let converter else { return nil }
-        guard let tapFormat, tapFormat.mSampleRate > 0 else { return input }
+        guard let tapFormat, tapFormat.mSampleRate > 0 else { return nil }
 
         let ratio = AudioConstants.sampleRate / tapFormat.mSampleRate
-        let outputFrameCount = Int(Double(input.count) * ratio) + 1
+        let outputFrameCount = Int(Double(frameCount) * ratio) + 1
+        let outputBufferSize = outputFrameCount * 2
 
-        // Grow resample output buffer if needed
-        if resampleOutputBuffer.count < outputFrameCount {
-            resampleOutputBuffer = [Float](repeating: 0, count: outputFrameCount)
+        if resampleOutputBuffer.count < outputBufferSize {
+            resampleOutputBuffer = [Float](repeating: 0, count: outputBufferSize)
         }
 
+        let bytesPerFrame = 2 * MemoryLayout<Float>.size
+        let inputByteSize = frameCount * bytesPerFrame
         var ioOutputDataPacketSize = UInt32(outputFrameCount)
 
-        let err = input.withUnsafeBytes { inputPtr in
+        let err = stereoBuffer.withUnsafeMutableBytes { inputPtr in
             resampleOutputBuffer.withUnsafeMutableBytes { outputPtr -> OSStatus in
                 var inputBufList = AudioBufferList(
                     mNumberBuffers: 1,
                     mBuffers: AudioBuffer(
-                        mNumberChannels: 1,
-                        mDataByteSize: UInt32(input.count * MemoryLayout<Float>.size),
-                        mData: UnsafeMutableRawPointer(mutating: inputPtr.baseAddress)
+                        mNumberChannels: 2,
+                        mDataByteSize: UInt32(inputByteSize),
+                        mData: inputPtr.baseAddress
                     )
                 )
 
                 var outputBufList = AudioBufferList(
                     mNumberBuffers: 1,
                     mBuffers: AudioBuffer(
-                        mNumberChannels: 1,
-                        mDataByteSize: UInt32(outputFrameCount * MemoryLayout<Float>.size),
+                        mNumberChannels: 2,
+                        mDataByteSize: UInt32(outputBufferSize * MemoryLayout<Float>.size),
                         mData: outputPtr.baseAddress
                     )
                 )
@@ -371,7 +393,7 @@ final class SystemAudioCapture: @unchecked Sendable {
                         }
                         ioData.pointee.mBuffers.mData = srcBufList.pointee.mBuffers.mData
                         ioData.pointee.mBuffers.mDataByteSize = available
-                        ioNumberDataPackets.pointee = available / 4
+                        ioNumberDataPackets.pointee = available / 8
                         srcBufList.pointee.mBuffers.mDataByteSize = 0
                         srcBufList.pointee.mBuffers.mData = nil
                         return noErr
@@ -386,9 +408,9 @@ final class SystemAudioCapture: @unchecked Sendable {
 
         guard err == noErr || err == Self.kNoMoreData else { return nil }
 
-        let actualCount = Int(ioOutputDataPacketSize)
-        guard actualCount > 0 else { return nil }
-        return Array(resampleOutputBuffer.prefix(actualCount))
+        let actualFrameCount = Int(ioOutputDataPacketSize)
+        guard actualFrameCount > 0 else { return nil }
+        return actualFrameCount * 2
     }
 
     // MARK: - Core Audio Helpers

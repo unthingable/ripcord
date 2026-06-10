@@ -1,56 +1,66 @@
 import Foundation
 
+/// Stereo-interleaved ring buffer of Float samples. A "frame" is one pair of
+/// L/R samples (= 2 Floats). All sizes externally are in frames; storage
+/// internally is `frames * 2` Floats.
 final class CircularAudioBuffer: @unchecked Sendable {
-    private var capacity: Int
+    static let channelsPerFrame = 2
+
+    private var capacityFrames: Int
     private var buffer: [Float]
-    private var writeHead: Int = 0
-    private var totalWritten: Int = 0
+    private var writeHead: Int = 0  // sample index (not frame index)
+    private var totalWritten: Int = 0  // in frames
     private let lock = NSLock()
 
     // Inline peak tracking for level meter
     private var meterPeakAccum: Float = 0
 
     init(durationSeconds: Int, sampleRate: Int = 48000) {
-        self.capacity = durationSeconds * sampleRate
-        self.buffer = [Float](repeating: 0, count: capacity)
+        self.capacityFrames = durationSeconds * sampleRate
+        self.buffer = [Float](repeating: 0, count: capacityFrames * Self.channelsPerFrame)
     }
 
-    var sampleCount: Int {
-        lock.withLock { min(totalWritten, capacity) }
+    /// Number of stereo frames currently buffered.
+    var frameCount: Int {
+        lock.withLock { min(totalWritten, capacityFrames) }
     }
 
-    func write(_ samples: [Float]) {
+    func write(_ samples: UnsafeBufferPointer<Float>) {
         lock.lock()
         defer { lock.unlock() }
 
-        for sample in samples {
-            buffer[writeHead] = sample
-            writeHead = (writeHead + 1) % capacity
+        let capacitySamples = capacityFrames * Self.channelsPerFrame
+        for i in 0..<samples.count {
+            buffer[writeHead] = samples[i]
+            writeHead = (writeHead + 1) % capacitySamples
 
-            let a = abs(sample)
+            let a = abs(samples[i])
             if a > meterPeakAccum { meterPeakAccum = a }
         }
-        totalWritten += samples.count
+        totalWritten += samples.count / Self.channelsPerFrame
     }
 
-    /// Returns all buffered audio in chronological order and resets the buffer.
+    /// Returns all buffered audio (stereo-interleaved) in chronological order
+    /// and resets the buffer.
     func drain() -> [Float] {
         lock.lock()
         defer { lock.unlock() }
 
-        let filled = min(totalWritten, capacity)
-        guard filled > 0 else { return [] }
+        let filledFrames = min(totalWritten, capacityFrames)
+        guard filledFrames > 0 else { return [] }
+        let filledSamples = filledFrames * Self.channelsPerFrame
+        let capacitySamples = capacityFrames * Self.channelsPerFrame
 
-        var result = [Float](repeating: 0, count: filled)
+        var result = [Float](repeating: 0, count: filledSamples)
 
-        if totalWritten >= capacity {
+        if totalWritten >= capacityFrames {
             // Buffer is full — read from writeHead (oldest) forward
-            let firstChunkLen = capacity - writeHead
-            result[0..<firstChunkLen] = buffer[writeHead..<capacity]
-            result[firstChunkLen..<filled] = buffer[0..<writeHead]
+            let firstChunkLen = capacitySamples - writeHead
+            result[0..<firstChunkLen] = buffer[writeHead..<capacitySamples]
+            result[firstChunkLen..<filledSamples] = buffer[0..<writeHead]
         } else {
             // Buffer not yet full — data starts at 0
-            result[0..<filled] = buffer[0..<filled]
+            result[0..<filledSamples] = buffer[0..<filledSamples]
         }
 
         // Reset
@@ -60,23 +70,25 @@ final class CircularAudioBuffer: @unchecked Sendable {
         return result
     }
 
-    /// Reads the last N samples from the buffer without draining.
-    func read(lastNSamples count: Int) -> [Float] {
+    /// Reads the last N frames (stereo-interleaved samples) without draining.
+    func read(lastNFrames count: Int) -> [Float] {
         lock.lock()
         defer { lock.unlock() }
 
-        let available = min(totalWritten, capacity)
-        let n = min(count, available)
+        let availableFrames = min(totalWritten, capacityFrames)
+        let n = min(count, availableFrames)
         guard n > 0 else { return [] }
 
-        var result = [Float](repeating: 0, count: n)
-        let start = (writeHead - n + capacity) % capacity
-        if start + n <= capacity {
-            result[0..<n] = buffer[start..<(start + n)]
+        let nSamples = n * Self.channelsPerFrame
+        let capacitySamples = capacityFrames * Self.channelsPerFrame
+        var result = [Float](repeating: 0, count: nSamples)
+        let start = (writeHead - nSamples + capacitySamples) % capacitySamples
+        if start + nSamples <= capacitySamples {
+            result[0..<nSamples] = buffer[start..<(start + nSamples)]
         } else {
-            let firstChunk = capacity - start
-            result[0..<firstChunk] = buffer[start..<capacity]
-            result[firstChunk..<n] = buffer[0..<(n - firstChunk)]
+            let firstChunk = capacitySamples - start
+            result[0..<firstChunk] = buffer[start..<capacitySamples]
+            result[firstChunk..<nSamples] = buffer[0..<(nSamples - firstChunk)]
         }
         return result
     }
@@ -94,8 +106,8 @@ final class CircularAudioBuffer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
-        capacity = durationSeconds * sampleRate
-        buffer = [Float](repeating: 0, count: capacity)
+        capacityFrames = durationSeconds * sampleRate
+        buffer = [Float](repeating: 0, count: capacityFrames * Self.channelsPerFrame)
         writeHead = 0
         totalWritten = 0
         meterPeakAccum = 0

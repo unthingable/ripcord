@@ -5,6 +5,7 @@ struct AudioInputDevice: Identifiable {
     let id: AudioDeviceID
     let uid: String
     let name: String
+    let inputChannelCount: Int
 }
 
 @Observable
@@ -51,11 +52,12 @@ final class AudioDeviceEnumerator {
 
         var result: [AudioInputDevice] = []
         for devID in deviceIDs {
-            guard hasInputStreams(devID) else { continue }
+            let chCount = inputChannelCount(devID)
+            guard chCount > 0 else { continue }
             guard let uid = deviceUID(devID), let name = deviceName(devID) else { continue }
             // Exclude our own aggregate device
             if name == "Ripcord-Tap" { continue }
-            result.append(AudioInputDevice(id: devID, uid: uid, name: name))
+            result.append(AudioInputDevice(id: devID, uid: uid, name: name, inputChannelCount: chCount))
         }
 
         result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -68,15 +70,34 @@ final class AudioDeviceEnumerator {
 
     // MARK: - Private
 
-    private func hasInputStreams(_ deviceID: AudioDeviceID) -> Bool {
+    /// Returns the total number of input channels the device exposes (summed
+    /// across all input streams). 0 means the device has no input (output-only).
+    private func inputChannelCount(_ deviceID: AudioDeviceID) -> Int {
         var address = AudioObjectPropertyAddress(
-            mSelector: kAudioDevicePropertyStreams,
+            mSelector: kAudioDevicePropertyStreamConfiguration,
             mScope: kAudioDevicePropertyScopeInput,
             mElement: kAudioObjectPropertyElementMain
         )
         var dataSize: UInt32 = 0
-        let status = AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &dataSize)
-        return status == noErr && dataSize > 0
+        guard AudioObjectGetPropertyDataSize(deviceID, &address, 0, nil, &dataSize) == noErr,
+              dataSize >= UInt32(MemoryLayout<AudioBufferList>.size) else {
+            return 0
+        }
+        let bufferListPtr = UnsafeMutableRawPointer.allocate(
+            byteCount: Int(dataSize), alignment: MemoryLayout<AudioBufferList>.alignment
+        )
+        defer { bufferListPtr.deallocate() }
+        guard AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, bufferListPtr) == noErr else {
+            return 0
+        }
+        let abl = UnsafeMutableAudioBufferListPointer(
+            bufferListPtr.bindMemory(to: AudioBufferList.self, capacity: 1)
+        )
+        var total: UInt32 = 0
+        for i in 0..<abl.count {
+            total += abl[i].mNumberChannels
+        }
+        return Int(total)
     }
 
     private func deviceUID(_ deviceID: AudioDeviceID) -> String? {

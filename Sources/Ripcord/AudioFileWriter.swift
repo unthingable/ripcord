@@ -53,6 +53,7 @@ final class AudioFileWriter: @unchecked Sendable {
     let quality: AudioQuality
     private(set) var totalFramesWritten: Int64 = 0
     private(set) var isOpen = false
+    private var normalizedWriteBuffer: [Float] = []
 
     init(url: URL, format: AudioOutputFormat, quality: AudioQuality, channelCount: UInt32 = 2) {
         self.url = url
@@ -171,9 +172,20 @@ final class AudioFileWriter: @unchecked Sendable {
             let chunkFrames = min(Self.maxFramesPerWrite, totalFrames - frameOffset)
             let sampleOffset = frameOffset * ch
             let chunkSamples = chunkFrames * ch
-            try samples.withUnsafeBufferPointer { bufferPointer in
-                guard let base = bufferPointer.baseAddress else { return }
-                let chunkPointer = base + sampleOffset
+            if normalizedWriteBuffer.count < chunkSamples {
+                normalizedWriteBuffer = [Float](repeating: 0, count: chunkSamples)
+            }
+            for i in 0..<chunkSamples {
+                let sample = samples[sampleOffset + i]
+                if sample.isFinite {
+                    normalizedWriteBuffer[i] = max(-1, min(1, sample))
+                } else {
+                    normalizedWriteBuffer[i] = 0
+                }
+            }
+
+            try normalizedWriteBuffer.withUnsafeBufferPointer { bufferPointer in
+                guard let chunkPointer = bufferPointer.baseAddress else { return }
                 let audioBuffer = AudioBuffer(
                     mNumberChannels: channelCount,
                     mDataByteSize: UInt32(chunkSamples * MemoryLayout<Float>.size),

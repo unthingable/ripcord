@@ -42,7 +42,17 @@ let package = Package(
                 .linkedFramework("AVFoundation"),
                 .linkedFramework("CoreMedia"),
                 .linkedFramework("AudioToolbox"),
+                .linkedFramework("AudioUnit"),
                 .linkedFramework("Accelerate"),
+            ]
+        ),
+        .executableTarget(
+            name: "usb-audio-capture",
+            path: "Sources/usb-audio-capture",
+            linkerSettings: [
+                .linkedFramework("CoreAudio"),
+                .linkedFramework("AudioToolbox"),
+                .linkedFramework("AudioUnit"),
             ]
         ),
         .executableTarget(
