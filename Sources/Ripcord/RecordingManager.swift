@@ -151,6 +151,8 @@ final class RecordingManager: @unchecked Sendable {
     var liveTranscriptRightContext: Double = 1.0
     var liveTranscriptMinContext: Double = 5.0
     var liveTranscriptConfirmThreshold: Double = 0.65
+    private var autoLiveTranscriptStartedForRecording = false
+    private var skipAutomaticTranscriptionForRecording = false
 
     let transcriptionService = TranscriptionService()
     private(set) var speakerProfileStore: SpeakerProfileStore
@@ -575,6 +577,12 @@ final class RecordingManager: @unchecked Sendable {
         if systemMicMode.isVoiceIsolation {
             logger.error("Recording while macOS Mic Mode is Voice Isolation; non-voice USB inputs may be attenuated")
         }
+        let skipAutomaticTranscription = shouldSkipAutomaticTranscriptionForCurrentInput()
+        skipAutomaticTranscriptionForRecording = skipAutomaticTranscription
+        autoLiveTranscriptStartedForRecording = false
+        if skipAutomaticTranscription, let device = currentSelectedMicDevice() {
+            logger.info("Skipping automatic transcription for USB audio input: \(device.name, privacy: .public)")
+        }
 
         let timestamp = ISO8601DateFormatter().string(from: Date())
             .replacingOccurrences(of: ":", with: "-")
@@ -687,7 +695,8 @@ final class RecordingManager: @unchecked Sendable {
             self.recordingElapsed = Date().timeIntervalSince(start) - self.pausedDuration
         }
 
-        if autoLiveTranscript && !liveTranscriptEnabled {
+        if autoLiveTranscript && !liveTranscriptEnabled && !skipAutomaticTranscription {
+            autoLiveTranscriptStartedForRecording = true
             Task { await setLiveTranscriptEnabled(true) }
         }
     }
@@ -696,9 +705,12 @@ final class RecordingManager: @unchecked Sendable {
         guard state == .recording || state == .paused else { return }
         logger.error("Recording stopping")
 
-        if autoLiveTranscript && liveTranscriptEnabled {
+        if autoLiveTranscriptStartedForRecording && liveTranscriptEnabled {
             Task { await setLiveTranscriptEnabled(false) }
         }
+        autoLiveTranscriptStartedForRecording = false
+        let skipAutomaticTranscription = skipAutomaticTranscriptionForRecording
+        skipAutomaticTranscriptionForRecording = false
 
         // Finalize any ongoing pause
         if let pauseStart = pauseStartTime {
@@ -803,7 +815,7 @@ final class RecordingManager: @unchecked Sendable {
             if recentRecordings.count > 10 { recentRecordings.removeLast() }
             UserDefaults.standard.set(true, forKey: SettingsKey.hasRecordedBefore)
             state = .buffering
-            if transcriptionEnabled && transcriptionService.modelsReady {
+            if transcriptionEnabled && transcriptionService.modelsReady && !skipAutomaticTranscription {
                 transcribeRecording(info)
             }
         case .failure(let error):
@@ -1060,6 +1072,11 @@ final class RecordingManager: @unchecked Sendable {
             return devices.first(where: { $0.id == defaultID })
         }
         return nil
+    }
+
+    private func shouldSkipAutomaticTranscriptionForCurrentInput() -> Bool {
+        guard micEnabled, let device = currentSelectedMicDevice() else { return false }
+        return device.shouldSkipAutomaticTranscription
     }
 
     /// Persist channel mode for a specific device UID and restart mic if

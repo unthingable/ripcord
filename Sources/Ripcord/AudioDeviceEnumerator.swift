@@ -6,6 +6,23 @@ struct AudioInputDevice: Identifiable {
     let uid: String
     let name: String
     let inputChannelCount: Int
+    let transportType: UInt32?
+
+    var isUSBTransport: Bool {
+        transportType == kAudioDeviceTransportTypeUSB
+    }
+
+    var isNamedMicrophone: Bool {
+        let lowercased = name.lowercased()
+        return lowercased == "mic"
+            || lowercased.hasPrefix("mic ")
+            || lowercased.contains("microphone")
+            || lowercased.contains(" mic")
+    }
+
+    var shouldSkipAutomaticTranscription: Bool {
+        isUSBTransport && !isNamedMicrophone
+    }
 }
 
 @Observable
@@ -57,7 +74,13 @@ final class AudioDeviceEnumerator {
             guard let uid = deviceUID(devID), let name = deviceName(devID) else { continue }
             // Exclude our own aggregate device
             if name == "Ripcord-Tap" { continue }
-            result.append(AudioInputDevice(id: devID, uid: uid, name: name, inputChannelCount: chCount))
+            result.append(AudioInputDevice(
+                id: devID,
+                uid: uid,
+                name: name,
+                inputChannelCount: chCount,
+                transportType: transportType(devID)
+            ))
         }
 
         result.sort { $0.name.localizedCaseInsensitiveCompare($1.name) == .orderedAscending }
@@ -106,6 +129,19 @@ final class AudioDeviceEnumerator {
 
     private func deviceName(_ deviceID: AudioDeviceID) -> String? {
         stringProperty(kAudioObjectPropertyName, of: deviceID)
+    }
+
+    private func transportType(_ deviceID: AudioDeviceID) -> UInt32? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioDevicePropertyTransportType,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var value: UInt32 = 0
+        var dataSize = UInt32(MemoryLayout<UInt32>.size)
+        let status = AudioObjectGetPropertyData(deviceID, &address, 0, nil, &dataSize, &value)
+        guard status == noErr else { return nil }
+        return value
     }
 
     private func stringProperty(_ selector: AudioObjectPropertySelector, of deviceID: AudioDeviceID) -> String? {
