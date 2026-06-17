@@ -1,5 +1,28 @@
 # Changelog
 
+## [0.12.0] - 2026-06-17
+
+### Added
+  * Per-device USB input controls for channel selection and input gain, including mono channel picking for multi-channel devices.
+  * Voice Isolation detection with a warning and quick access to the macOS Mic Mode picker when recording.
+  * Compact, clickable recording settings in the main panel for buffer duration, file format, and quality.
+  * Diarization accuracy test harness and speaker re-verification pass for improving speaker attribution.
+  * Generic CoreAudio USB capture diagnostic target for isolating USB device behavior.
+
+### Changed
+  * Reworked microphone capture around AUHAL with an IOProc fallback, lower-latency sample handoff, and safer real-time callback behavior.
+  * Preserve incoming stereo system audio in mixed recordings, and downmix sources only when writing split-channel recording files.
+  * Skip automatic live transcript and post-recording transcription for USB inputs that look like instruments or audio interfaces.
+  * Replace the expected speaker count dropdown with compact quick-pick buttons.
+  * Raise the default diarization minimum segment duration from 0.1s to 0.5s.
+
+### Fixed
+  * Fix USB instrument capture reliability for class-compliant USB audio interfaces, with a warning when macOS Voice Isolation may still suppress non-voice input.
+  * Fix stereo-mode recordings becoming dual-mono because system audio capture was created as mono.
+  * Fix per-device dB gain editing so partially typed values are not immediately overwritten.
+  * Fix speaker preview playback when all candidate segments are short.
+  * Clamp invalid or out-of-range samples before writing audio files.
+
 ## 0.11.0
 
 - Fix recording appearing to stop on its own during a meeting. A live transcript error was overwriting the recording state, making the UI show "not recording" while audio continued writing to disk — but the file couldn't be finalized cleanly.
