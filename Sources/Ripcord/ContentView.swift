@@ -514,13 +514,88 @@ struct ContentView: View {
 
     @ViewBuilder
     private var configSummary: some View {
-        let bufferLabel = manager.bufferDurationSeconds / 60
-        let formatLabel = manager.outputFormat.rawValue
-        let qualityLabel = manager.outputFormat == .wav
-            ? "16-bit"
-            : manager.audioQuality.label(for: manager.outputFormat)
-        Text("Buffer: \(bufferLabel) min  \u{2022}  \(formatLabel)  \u{2022}  \(qualityLabel)")
-            .font(.caption)
+        HStack(spacing: 4) {
+            configMenu(
+                title: "Buffer",
+                value: "\(manager.bufferDurationSeconds / 60) min",
+                help: "Buffer duration"
+            ) {
+                ForEach([60, 300, 600, 900], id: \.self) { seconds in
+                    Button {
+                        manager.updateBufferDuration(seconds)
+                    } label: {
+                        let label = "\(seconds / 60) min"
+                        if manager.bufferDurationSeconds == seconds {
+                            Label(label, systemImage: "checkmark")
+                        } else {
+                            Text(label)
+                        }
+                    }
+                }
+            }
+
+            Text("\u{2022}")
+                .foregroundStyle(.secondary)
+
+            configMenu(
+                title: nil,
+                value: manager.outputFormat.rawValue,
+                help: "Recording format"
+            ) {
+                ForEach(AudioOutputFormat.allCases) { format in
+                    Button {
+                        manager.updateOutputFormat(format)
+                    } label: {
+                        if manager.outputFormat == format {
+                            Label(format.rawValue, systemImage: "checkmark")
+                        } else {
+                            Text(format.rawValue)
+                        }
+                    }
+                }
+            }
+
+            Text("\u{2022}")
+                .foregroundStyle(.secondary)
+
+            if manager.outputFormat == .wav {
+                Text("16-bit")
+                    .font(.system(size: 10))
+                    .foregroundStyle(.secondary)
+                    .help("WAV records as 16-bit stereo")
+            } else {
+                configMenu(
+                    title: nil,
+                    value: manager.audioQuality.label(for: manager.outputFormat),
+                    help: "Recording quality"
+                ) {
+                    ForEach(AudioQuality.allCases) { quality in
+                        Button {
+                            manager.updateAudioQuality(quality)
+                        } label: {
+                            let label = quality.label(for: manager.outputFormat)
+                            if manager.audioQuality == quality {
+                                Label(label, systemImage: "checkmark")
+                            } else {
+                                Text(label)
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        .font(.system(size: 10))
+        .disabled(manager.state == .recording || manager.state == .paused)
+    }
+
+    @ViewBuilder
+    private func configMenu<Items: View>(
+        title: String?,
+        value: String,
+        help: String,
+        @ViewBuilder items: @escaping () -> Items
+    ) -> some View {
+        ConfigSummaryMenu(title: title, value: value, help: help, items: items)
     }
 
     // MARK: - Per-device input gain (dB)
@@ -853,6 +928,42 @@ struct ContentView: View {
         let m = seconds / 60
         let s = seconds % 60
         return String(format: "%d:%02d", m, s)
+    }
+}
+
+private struct ConfigSummaryMenu<Items: View>: View {
+    let title: String?
+    let value: String
+    let help: String
+    let items: () -> Items
+
+    @State private var isHovered = false
+
+    private var label: String {
+        title.map { "\($0): \(value)" } ?? value
+    }
+
+    var body: some View {
+        Menu {
+            items()
+        } label: {
+            Text(label)
+                .font(.system(size: 10))
+                .lineLimit(1)
+                .padding(.horizontal, 3)
+                .padding(.vertical, 1)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(.primary.opacity(isHovered ? 0.06 : 0))
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 4))
+        }
+        .menuStyle(.borderlessButton)
+        .menuIndicator(.hidden)
+        .controlSize(.mini)
+        .fixedSize(horizontal: true, vertical: true)
+        .help(help)
+        .onHover { isHovered = $0 }
     }
 }
 
