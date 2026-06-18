@@ -17,6 +17,8 @@ struct ContentView: View {
     @AppStorage(SettingsKey.mainPanelRecentsHeight) private var recentsHeight: Double = 160
     @State private var dragStartHeight: Double?
     @State private var resizeHovering = false
+    @State private var micDevicePickerHovered = false
+    @State private var micChannelPickerHovered = false
     // Stored outside @State to avoid MainActor-isolation issues in NotificationCenter closures
     private static nonisolated(unsafe) var settingsCloseObserver: NSObjectProtocol?
 
@@ -646,14 +648,16 @@ struct ContentView: View {
                 .padding(.vertical, 2)
                 .background(
                     RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.secondary.opacity(0.15))
+                        .fill(Color.secondary.opacity(micChannelPickerHovered ? 0.24 : 0.15))
                 )
+                .contentShape(RoundedRectangle(cornerRadius: 4))
         }
         .menuStyle(.borderlessButton)
         .menuIndicator(.hidden)
         .fixedSize()
         .help("Mic input channels: stereo pair, or single channel as mono.")
         .opacity(manager.micEnabled ? 1 : 0.4)
+        .onHover { micChannelPickerHovered = $0 }
     }
 
     // MARK: - Mic Row (toggle + device picker)
@@ -714,10 +718,18 @@ struct ContentView: View {
                         .lineLimit(1)
                     Spacer()
                 }
+                .padding(.horizontal, 4)
+                .padding(.vertical, 2)
+                .background(
+                    RoundedRectangle(cornerRadius: 4)
+                        .fill(.primary.opacity(micDevicePickerHovered ? 0.08 : 0))
+                )
+                .contentShape(RoundedRectangle(cornerRadius: 4))
             }
             .menuStyle(.borderlessButton)
             .fixedSize(horizontal: false, vertical: true)
             .opacity(manager.micEnabled ? 1 : 0.4)
+            .onHover { micDevicePickerHovered = $0 }
 
             // Channel-mode picker: only visible when the selected device exposes
             // more than one input channel. For a single-channel device there's
@@ -944,26 +956,32 @@ private struct ConfigSummaryMenu<Items: View>: View {
     }
 
     var body: some View {
-        Menu {
-            items()
-        } label: {
-            Text(label)
-                .font(.system(size: 10))
-                .lineLimit(1)
-                .padding(.horizontal, 3)
-                .padding(.vertical, 1)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(.primary.opacity(isHovered ? 0.06 : 0))
-                )
-                .contentShape(RoundedRectangle(cornerRadius: 4))
+        HStack(spacing: 0) {
+            Menu {
+                items()
+            } label: {
+                Text(label)
+                    .font(.system(size: 10))
+                    .lineLimit(1)
+                    .padding(.horizontal, 5)
+                    .padding(.vertical, 2)
+                    .contentShape(Rectangle())
+            }
+            .menuStyle(.borderlessButton)
+            .menuIndicator(.hidden)
+            .controlSize(.mini)
         }
-        .menuStyle(.borderlessButton)
-        .menuIndicator(.hidden)
-        .controlSize(.mini)
+        .background(
+            RoundedRectangle(cornerRadius: 4)
+                .fill(Color.secondary.opacity(isHovered ? 0.18 : 0))
+        )
+        .contentShape(RoundedRectangle(cornerRadius: 4))
         .fixedSize(horizontal: true, vertical: true)
         .help(help)
         .onHover { isHovered = $0 }
+        .onContinuousHover { phase in
+            isHovered = phase != .ended
+        }
     }
 }
 

@@ -1,5 +1,10 @@
 # Changelog
 
+## [0.12.1] - 2026-06-18
+
+### Fixed
+  * Make hover affordances visible on compact recording setting labels in the main panel.
+
 ## [0.12.0] - 2026-06-17
 
 ### Added
