@@ -83,6 +83,8 @@ enum SettingsKey {
     static let liveTranscriptConfirmThreshold = "ripcord.liveTranscriptConfirmThreshold"
     static let modelDownloadPromptDismissed = "ripcord.modelDownloadPromptDismissed"
     static let mainPanelRecentsHeight = "ripcord.mainPanelRecentsHeight"
+    static let micLatencySettings = "ripcord.micLatencySettings"
+    static let pendingMicRestoreUID = "ripcord.pendingMicRestoreUID"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -135,6 +137,9 @@ final class RecordingManager: @unchecked Sendable {
     var systemLevel: Float = 0
     var micLevel: Float = 0
     var selectedMicUID: String?
+    private var pendingMicRestoreUID: String?
+    var micLatencyEstimate: AudioLatencyEstimate?
+    private var micLatencySettingsByUID: [String: MicLatencySettings] = [:]
     var transcriptionEnabled: Bool = false
     var transcriptionConfig: TranscriptionConfig = TranscriptionConfig()
     var silenceAutoPauseEnabled: Bool = false
@@ -162,12 +167,14 @@ final class RecordingManager: @unchecked Sendable {
     private let micCapture = MicrophoneCapture()
     private let micChannelModeStore = MicChannelModeStore()
     private let micGainStore = MicGainStore()
+    private let micLatencyStore = MicLatencyStore(key: SettingsKey.micLatencySettings)
+    private let latencyEstimateQueue = DispatchQueue(label: "com.vibe.ripcord.latencyEstimate", qos: .utility)
 
     // CoreAudio callbacks write into these pre-allocated handoffs. A normal
     // queue drains them and performs buffering, waveform, recording, and live
     // transcript work so the real-time threads do not take app-level locks.
-    private let systemSampleHandoff = AudioSampleHandoff(capacityFrames: AudioConstants.sampleRateInt * 2)
-    private let micSampleHandoff = AudioSampleHandoff(capacityFrames: AudioConstants.sampleRateInt * 2)
+    private let systemSampleHandoff = AudioChunkHandoff(capacityFrames: AudioConstants.sampleRateInt * 2)
+    private let micSampleHandoff = AudioChunkHandoff(capacityFrames: AudioConstants.sampleRateInt * 2)
     private let audioProcessingQueue = DispatchQueue(label: "com.vibe.ripcord.audiohandoff", qos: .userInitiated)
     private var audioProcessingTimer: DispatchSourceTimer?
 
@@ -181,8 +188,8 @@ final class RecordingManager: @unchecked Sendable {
 
     // Pending sample accumulation for recording — protected by pendingLock
     private var pendingActive = false
-    private var pendingSystemSamples: [Float] = []
-    private var pendingMicSamples: [Float] = []
+    private var pendingSystemChunks: [AudioSampleChunk] = []
+    private var pendingMicChunks: [AudioSampleChunk] = []
     private let pendingLock = NSLock()
 
     // Live transcript streaming
@@ -200,9 +207,8 @@ final class RecordingManager: @unchecked Sendable {
     private var writeError: Error?         // Only accessed on writeQueue
     private var writeTimer: DispatchSourceTimer?  // Only accessed on writeQueue
 
-    // Remainder buffers for carry-forward interleaving — only accessed on writeQueue
-    private var systemRemainder: [Float] = []
-    private var micRemainder: [Float] = []
+    private var timelineAligner = AudioTimelineAligner(oneSidedFlushFrames: 24_000)
+    private var effectiveMicAdvanceFrames = 0
 
     // Channel split snapshot — only accessed on writeQueue
     private var splitEnabled: Bool = true
@@ -298,6 +304,8 @@ final class RecordingManager: @unchecked Sendable {
         nativeMicDebugEnabled = defaults.bool(forKey: SettingsKey.nativeMicDebugEnabled)
         channelSplit = defaults.bool(forKey: SettingsKey.channelSplit)
         selectedMicUID = defaults.string(forKey: SettingsKey.selectedMicUID)
+        pendingMicRestoreUID = defaults.string(forKey: SettingsKey.pendingMicRestoreUID)
+        micLatencySettingsByUID = micLatencyStore.allSettings()
         transcriptionEnabled = defaults.bool(forKey: SettingsKey.enableTranscription)
 
         // Load silence auto-pause settings
@@ -369,6 +377,11 @@ final class RecordingManager: @unchecked Sendable {
         liveTranscriptConfirmThreshold = savedThresh > 0 ? savedThresh : 0.65
 
         refreshSystemMicMode()
+        deviceEnumerator.onDevicesChanged = { [weak self] devices in
+            self?.handleInputDevicesChanged(devices)
+        }
+        handleInputDevicesChanged(deviceEnumerator.inputDevices)
+        refreshCurrentMicLatencyEstimate()
         installSignalHandlers()
         startAudioProcessingTimer()
     }
@@ -420,11 +433,11 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         // Set up audio callbacks
-        systemCapture.onSamples = { [weak self] samples in
-            self?.systemSampleHandoff.write(samples)
+        systemCapture.onSamples = { [weak self] samples, timing in
+            self?.systemSampleHandoff.write(samples, timing: timing)
         }
-        micCapture.onSamples = { [weak self] samples in
-            self?.micSampleHandoff.write(samples)
+        micCapture.onSamples = { [weak self] samples, timing in
+            self?.micSampleHandoff.write(samples, timing: timing)
         }
 
         // Coordinate mic AUHAL with system capture restarts.
@@ -640,8 +653,8 @@ final class RecordingManager: @unchecked Sendable {
         // Enable pending AFTER reading (tiny sample gap is negligible)
         pendingLock.lock()
         pendingActive = true
-        pendingSystemSamples.removeAll()
-        pendingMicSamples.removeAll()
+        pendingSystemChunks.removeAll()
+        pendingMicChunks.removeAll()
         pendingLock.unlock()
 
         // Snapshot settings for writeQueue (read from main thread before dispatch)
@@ -649,13 +662,14 @@ final class RecordingManager: @unchecked Sendable {
         let silenceOn = silenceAutoPauseEnabled
         let silenceThresh = silenceThreshold
         let silenceTimeout = silenceTimeoutSeconds
+        let micAdvanceFrames = currentEffectiveMicLatencyFrames()
 
         writeQueue.async { [weak self] in
             guard let self else { return }
             self.writer = newWriter
             self.writeError = nil
-            self.systemRemainder = []
-            self.micRemainder = []
+            self.timelineAligner.reset()
+            self.effectiveMicAdvanceFrames = micAdvanceFrames
             self.splitEnabled = split
             self.silenceEnabled = silenceOn
             self.silenceThresholdLocal = silenceThresh
@@ -664,7 +678,10 @@ final class RecordingManager: @unchecked Sendable {
             self.silenceDetected = false
 
             // Write the back-record buffer
-            let stereoBuffered = self.packStereo(systemSamples, micSamples)
+            let stereoBuffered = self.packStereo(
+                systemSamples,
+                Self.shiftStereo(micSamples, byAdvancingFrames: micAdvanceFrames)
+            )
             if !stereoBuffered.isEmpty {
                 do {
                     try newWriter.append(samples: stereoBuffered)
@@ -732,10 +749,10 @@ final class RecordingManager: @unchecked Sendable {
         // Disable pending accumulation and grab remaining samples
         pendingLock.lock()
         pendingActive = false
-        let remainingSystem = pendingSystemSamples
-        let remainingMic = pendingMicSamples
-        pendingSystemSamples.removeAll()
-        pendingMicSamples.removeAll()
+        let remainingSystem = pendingSystemChunks
+        let remainingMic = pendingMicChunks
+        pendingSystemChunks.removeAll()
+        pendingMicChunks.removeAll()
         pendingLock.unlock()
 
         if nativeMicDebugEnabled {
@@ -749,14 +766,13 @@ final class RecordingManager: @unchecked Sendable {
             self.writeTimer?.cancel()
             self.writeTimer = nil
 
-            // Combine remainders with final pending samples
-            let finalSystem = self.systemRemainder + remainingSystem
-            let finalMic = self.micRemainder + remainingMic
-            self.systemRemainder = []
-            self.micRemainder = []
-
-            // Final flush uses max() — no next cycle to carry forward to
-            let stereo = self.packStereo(finalSystem, finalMic)
+            let stereo = self.timelineAligner.append(
+                system: remainingSystem,
+                mic: remainingMic,
+                micAdvanceFrames: self.effectiveMicAdvanceFrames,
+                split: self.splitEnabled,
+                force: true
+            )
             if !stereo.isEmpty, let w = self.writer, self.writeError == nil {
                 do {
                     try w.append(samples: stereo)
@@ -833,20 +849,22 @@ final class RecordingManager: @unchecked Sendable {
         // Stop accumulating samples for recording
         pendingLock.lock()
         pendingActive = false
-        let remainingSys = pendingSystemSamples
-        let remainingMic = pendingMicSamples
-        pendingSystemSamples.removeAll()
-        pendingMicSamples.removeAll()
+        let remainingSys = pendingSystemChunks
+        let remainingMic = pendingMicChunks
+        pendingSystemChunks.removeAll()
+        pendingMicChunks.removeAll()
         pendingLock.unlock()
 
         // Flush remaining samples to disk
         writeQueue.async { [weak self] in
             guard let self, let w = self.writer, self.writeError == nil else { return }
-            let finalSys = self.systemRemainder + remainingSys
-            let finalMic = self.micRemainder + remainingMic
-            self.systemRemainder = []
-            self.micRemainder = []
-            let stereo = self.packStereo(finalSys, finalMic)
+            let stereo = self.timelineAligner.append(
+                system: remainingSys,
+                mic: remainingMic,
+                micAdvanceFrames: self.effectiveMicAdvanceFrames,
+                split: self.splitEnabled,
+                force: true
+            )
             if !stereo.isEmpty {
                 do {
                     try w.append(samples: stereo)
@@ -878,9 +896,13 @@ final class RecordingManager: @unchecked Sendable {
         // Re-enable pending
         pendingLock.lock()
         pendingActive = true
-        pendingSystemSamples.removeAll()
-        pendingMicSamples.removeAll()
+        pendingSystemChunks.removeAll()
+        pendingMicChunks.removeAll()
         pendingLock.unlock()
+
+        writeQueue.async { [weak self] in
+            self?.timelineAligner.reset()
+        }
 
         // Update bar states to recorded
         waveformTracker.setBarState(.recorded)
@@ -1041,6 +1063,8 @@ final class RecordingManager: @unchecked Sendable {
 
     func updateSelectedMic(_ uid: String?) async {
         selectedMicUID = uid
+        pendingMicRestoreUID = nil
+        UserDefaults.standard.removeObject(forKey: SettingsKey.pendingMicRestoreUID)
         if let uid {
             UserDefaults.standard.set(uid, forKey: SettingsKey.selectedMicUID)
         } else {
@@ -1051,6 +1075,38 @@ final class RecordingManager: @unchecked Sendable {
             micCapture.stop()
             await startMic()
         }
+        refreshCurrentMicLatencyEstimate()
+    }
+
+    private func handleInputDevicesChanged(_ devices: [AudioInputDevice]) {
+        if let pendingMicRestoreUID,
+           devices.contains(where: { $0.uid == pendingMicRestoreUID }) {
+            selectedMicUID = pendingMicRestoreUID
+            self.pendingMicRestoreUID = nil
+            UserDefaults.standard.set(pendingMicRestoreUID, forKey: SettingsKey.selectedMicUID)
+            UserDefaults.standard.removeObject(forKey: SettingsKey.pendingMicRestoreUID)
+            Task { await restartMicIfRunning() }
+            refreshCurrentMicLatencyEstimate()
+            return
+        }
+
+        guard let selectedMicUID,
+              !devices.contains(where: { $0.uid == selectedMicUID }) else {
+            return
+        }
+
+        pendingMicRestoreUID = selectedMicUID
+        self.selectedMicUID = nil
+        UserDefaults.standard.removeObject(forKey: SettingsKey.selectedMicUID)
+        UserDefaults.standard.set(selectedMicUID, forKey: SettingsKey.pendingMicRestoreUID)
+        Task { await restartMicIfRunning() }
+        refreshCurrentMicLatencyEstimate()
+    }
+
+    private func restartMicIfRunning() async {
+        guard micCapture.isRunning else { return }
+        micCapture.stop()
+        await startMic()
     }
 
     /// Returns the persisted channel mode for the currently selected mic
@@ -1068,7 +1124,7 @@ final class RecordingManager: @unchecked Sendable {
         if let uid = selectedMicUID {
             return devices.first(where: { $0.uid == uid })
         }
-        if let defaultID = MicrophoneCapture.currentDefaultInputDeviceID() {
+        if let defaultID = deviceEnumerator.defaultInputDeviceID {
             return devices.first(where: { $0.id == defaultID })
         }
         return nil
@@ -1103,6 +1159,76 @@ final class RecordingManager: @unchecked Sendable {
         micGainStore.setGainDB(dB, forUID: uid)
         if currentSelectedMicDevice()?.uid == uid {
             micCapture.setInputGain(dB: dB)
+        }
+    }
+
+    func currentMicLatencySettings() -> MicLatencySettings {
+        guard let device = currentSelectedMicDevice() else { return MicLatencySettings() }
+        return micLatencySettingsByUID[device.uid] ?? MicLatencySettings()
+    }
+
+    func currentMicLatencyEstimate() -> AudioLatencyEstimate? {
+        micLatencyEstimate
+    }
+
+    func refreshCurrentMicLatencyEstimate() {
+        let inputID = currentSelectedMicDevice()?.id
+        let selectedUID = currentSelectedMicDevice()?.uid
+        latencyEstimateQueue.async { [weak self] in
+            let estimate = AudioLatencyEstimator.estimate(inputDeviceID: inputID)
+            DispatchQueue.main.async { [weak self] in
+                guard let self else { return }
+                if self.currentSelectedMicDevice()?.uid == selectedUID {
+                    self.micLatencyEstimate = estimate
+                    self.refreshWriteLatencyOffsetIfNeeded(uid: selectedUID ?? "")
+                }
+            }
+        }
+    }
+
+    func currentEffectiveMicLatencyOffsetMs() -> Double {
+        let settings = currentMicLatencySettings()
+        if settings.autoEnabled {
+            return MicLatencyStore.clamp((currentMicLatencyEstimate()?.totalMs ?? 0) + settings.manualTrimMs)
+        }
+        return settings.manualOffsetMs
+    }
+
+    func updateMicLatencyAutoEnabled(_ enabled: Bool, forUID uid: String) {
+        var settings = micLatencySettingsByUID[uid] ?? MicLatencySettings()
+        settings.autoEnabled = enabled
+        setMicLatencySettings(settings, forUID: uid)
+        refreshWriteLatencyOffsetIfNeeded(uid: uid)
+    }
+
+    func updateMicLatencyManualOffsetMs(_ value: Double, forUID uid: String) {
+        var settings = micLatencySettingsByUID[uid] ?? MicLatencySettings()
+        settings.manualOffsetMs = MicLatencyStore.clamp(value)
+        setMicLatencySettings(settings, forUID: uid)
+        refreshWriteLatencyOffsetIfNeeded(uid: uid)
+    }
+
+    func updateMicLatencyManualTrimMs(_ value: Double, forUID uid: String) {
+        var settings = micLatencySettingsByUID[uid] ?? MicLatencySettings()
+        settings.manualTrimMs = MicLatencyStore.clamp(value)
+        setMicLatencySettings(settings, forUID: uid)
+        refreshWriteLatencyOffsetIfNeeded(uid: uid)
+    }
+
+    private func setMicLatencySettings(_ settings: MicLatencySettings, forUID uid: String) {
+        micLatencySettingsByUID[uid] = settings
+        micLatencyStore.setSettings(settings, forUID: uid)
+    }
+
+    private func currentEffectiveMicLatencyFrames() -> Int {
+        Int((currentEffectiveMicLatencyOffsetMs() * AudioConstants.sampleRate / 1000.0).rounded())
+    }
+
+    private func refreshWriteLatencyOffsetIfNeeded(uid: String) {
+        guard currentSelectedMicDevice()?.uid == uid else { return }
+        let frames = currentEffectiveMicLatencyFrames()
+        writeQueue.async { [weak self] in
+            self?.effectiveMicAdvanceFrames = frames
         }
     }
 
@@ -1315,6 +1441,25 @@ final class RecordingManager: @unchecked Sendable {
         splitEnabled
             ? Self.interleave(system, mic)
             : Self.mixStereo(system, mic)
+    }
+
+    static func shiftStereo(_ samples: [Float], byAdvancingFrames frames: Int) -> [Float] {
+        let ch = CircularAudioBuffer.channelsPerFrame
+        guard frames != 0, !samples.isEmpty else { return samples }
+        let frameCount = samples.count / ch
+        guard frameCount > 0 else { return samples }
+
+        if frames > 0 {
+            let dropSamples = min(samples.count, frames * ch)
+            var shifted = Array(samples.dropFirst(dropSamples))
+            shifted.append(contentsOf: repeatElement(Float(0), count: dropSamples))
+            return shifted
+        } else {
+            let padSamples = min(samples.count, -frames * ch)
+            var shifted = Array(repeating: Float(0), count: padSamples)
+            shifted.append(contentsOf: samples.prefix(max(0, samples.count - padSamples)))
+            return shifted
+        }
     }
 
     /// Mixed mode: preserve stereo per source, sum L+L and R+R per frame.
@@ -1540,37 +1685,47 @@ final class RecordingManager: @unchecked Sendable {
         if sysDrain.droppedSamples > 0 {
             logger.error("System audio handoff dropped \(sysDrain.droppedSamples) samples")
         }
-        if !sysDrain.samples.isEmpty {
-            sysDrain.samples.withUnsafeBufferPointer { processSystemSamples($0) }
+        if !sysDrain.chunks.isEmpty {
+            processSystemChunks(sysDrain.chunks)
         }
 
         let micDrain = micSampleHandoff.drain()
         if micDrain.droppedSamples > 0 {
             logger.error("Mic audio handoff dropped \(micDrain.droppedSamples) samples")
         }
-        if !micDrain.samples.isEmpty {
-            micDrain.samples.withUnsafeBufferPointer { processMicSamples($0) }
+        if !micDrain.chunks.isEmpty {
+            processMicChunks(micDrain.chunks)
         }
     }
 
-    private func processSystemSamples(_ samples: UnsafeBufferPointer<Float>) {
-        routeSamples(samples, peakAccum: &systemPeakAccum,
-                     pendingArray: &pendingSystemSamples, buffer: systemBuffer)
-        liveTranscriptLock.withLock { liveTranscriptStream }?.feedSystemAudio(samples)
+    private func processSystemChunks(_ chunks: [AudioSampleChunk]) {
+        routeChunks(chunks, peakAccum: &systemPeakAccum,
+                    pendingArray: &pendingSystemChunks, buffer: systemBuffer)
+        for chunk in chunks {
+            chunk.samples.withUnsafeBufferPointer { samples in
+                liveTranscriptLock.withLock { liveTranscriptStream }?.feedSystemAudio(samples)
+            }
+        }
     }
 
-    private func processMicSamples(_ samples: UnsafeBufferPointer<Float>) {
-        routeSamples(samples, peakAccum: &micPeakAccum,
-                     pendingArray: &pendingMicSamples, buffer: micBuffer)
-        liveTranscriptLock.withLock { liveTranscriptStream }?.feedMicAudio(samples)
+    private func processMicChunks(_ chunks: [AudioSampleChunk]) {
+        routeChunks(chunks, peakAccum: &micPeakAccum,
+                    pendingArray: &pendingMicChunks, buffer: micBuffer)
+        for chunk in chunks {
+            chunk.samples.withUnsafeBufferPointer { samples in
+                liveTranscriptLock.withLock { liveTranscriptStream }?.feedMicAudio(samples)
+            }
+        }
     }
 
-    private func routeSamples(_ samples: UnsafeBufferPointer<Float>, peakAccum: inout Float,
-                              pendingArray: inout [Float], buffer: CircularAudioBuffer) {
+    private func routeChunks(_ chunks: [AudioSampleChunk], peakAccum: inout Float,
+                             pendingArray: inout [AudioSampleChunk], buffer: CircularAudioBuffer) {
         var peak: Float = 0
-        for i in 0..<samples.count {
-            let a = abs(samples[i])
-            if a > peak { peak = a }
+        for chunk in chunks {
+            for sample in chunk.samples {
+                let a = abs(sample)
+                if a > peak { peak = a }
+            }
         }
         meterLock.lock()
         if peak > peakAccum { peakAccum = peak }
@@ -1578,52 +1733,45 @@ final class RecordingManager: @unchecked Sendable {
 
         waveformTracker.feedPeak(peak)
 
-        buffer.write(samples)
+        for chunk in chunks {
+            chunk.samples.withUnsafeBufferPointer { buffer.write($0) }
+        }
 
         pendingLock.lock()
         if pendingActive {
-            pendingArray.append(contentsOf: samples)
+            pendingArray.append(contentsOf: chunks)
         }
         pendingLock.unlock()
     }
 
     /// Called on writeQueue by the write timer — flushes pending samples to disk.
-    /// Bug #3 fix: Uses carry-forward remainder approach to avoid zero-padding micro-gaps.
-    /// System and mic deliver different sample counts per 50ms cycle. Instead of padding the
-    /// shorter one with zeros, we interleave min() frames and carry forward the tail.
+    /// Uses timestamped chunks to avoid aligning sources by queue arrival time.
     private func flushPendingSamples() {
         pendingLock.lock()
-        let pendingSys = pendingSystemSamples
-        let pendingMic = pendingMicSamples
-        pendingSystemSamples.removeAll(keepingCapacity: true)
-        pendingMicSamples.removeAll(keepingCapacity: true)
+        let pendingSys = pendingSystemChunks
+        let pendingMic = pendingMicChunks
+        pendingSystemChunks.removeAll(keepingCapacity: true)
+        pendingMicChunks.removeAll(keepingCapacity: true)
         pendingLock.unlock()
-
-        // Prepend any carried-forward remainder from last cycle
-        let sys = systemRemainder.isEmpty ? pendingSys : systemRemainder + pendingSys
-        let mic = micRemainder.isEmpty ? pendingMic : micRemainder + pendingMic
-        systemRemainder = []
-        micRemainder = []
 
         // Compute combined peak amplitude for silence detection.
         var flushPeak: Float = 0
-        if !sys.isEmpty || !mic.isEmpty {
-            for s in sys {
-                let a = abs(s)
-                if a > flushPeak { flushPeak = a }
-            }
-            for s in mic {
-                let a = abs(s)
-                if a > flushPeak { flushPeak = a }
+        if !pendingSys.isEmpty || !pendingMic.isEmpty {
+            for chunk in pendingSys + pendingMic {
+                for s in chunk.samples {
+                    let a = abs(s)
+                    if a > flushPeak { flushPeak = a }
+                }
             }
         }
 
         // Silence detection: use the already-computed peak amplitude.
         // silenceSampleThreshold and silenceSampleCount are counted in frames;
-        // sys/mic are stereo-interleaved, so divide their sample count by 2.
         if silenceEnabled {
             if flushPeak < silenceThresholdLocal {
-                silenceSampleCount += max(sys.count, mic.count) / CircularAudioBuffer.channelsPerFrame
+                let sysFrames = pendingSys.reduce(0) { $0 + $1.frameCount }
+                let micFrames = pendingMic.reduce(0) { $0 + $1.frameCount }
+                silenceSampleCount += max(sysFrames, micFrames)
                 if silenceSampleCount >= silenceSampleThreshold {
                     if !silenceDetected {
                         silenceDetected = true
@@ -1631,7 +1779,8 @@ final class RecordingManager: @unchecked Sendable {
                             self?.isSilencePaused = true
                         }
                     }
-                    // Discard samples and clear remainders during silence
+                    // Discard samples and clear buffered alignment state during silence.
+                    timelineAligner.reset()
                     return
                 }
                 // Below threshold but timeout not yet reached — fall through and write normally
@@ -1648,39 +1797,13 @@ final class RecordingManager: @unchecked Sendable {
 
         guard let w = writer, writeError == nil else { return }
 
-        // sys and mic are stereo-interleaved (2 floats per frame). Align prefix
-        // lengths to frame boundaries so we never split a frame across cycles.
-        let ch = CircularAudioBuffer.channelsPerFrame
-        let sysFrames = sys.count / ch
-        let micFrames = mic.count / ch
-
-        let stereo: [Float]
-        if sysFrames > 0 && micFrames > 0 {
-            // Both sources have data — pack min(), carry forward the tail
-            let lenFrames = min(sysFrames, micFrames)
-            let lenSamples = lenFrames * ch
-            stereo = packStereo(Array(sys.prefix(lenSamples)), Array(mic.prefix(lenSamples)))
-            if sysFrames > lenFrames {
-                systemRemainder = Array(sys.suffix(sys.count - lenSamples))
-            }
-            if micFrames > lenFrames {
-                micRemainder = Array(mic.suffix(mic.count - lenSamples))
-            }
-        } else if sysFrames == 0 && micFrames == 0 {
-            // Nothing to write
-            return
-        } else if sysFrames == 0 && micFrames <= Self.remainderCap {
-            // Mic has data but system doesn't yet — carry forward, wait for next cycle
-            micRemainder = mic
-            return
-        } else if micFrames == 0 && sysFrames <= Self.remainderCap {
-            // System has data but mic doesn't yet — carry forward, wait for next cycle
-            systemRemainder = sys
-            return
-        } else {
-            // One source exceeds the cap — the other is truly off; flush with zero-pad
-            stereo = packStereo(sys, mic)
-        }
+        let stereo = timelineAligner.append(
+            system: pendingSys,
+            mic: pendingMic,
+            micAdvanceFrames: effectiveMicAdvanceFrames,
+            split: splitEnabled,
+            force: false
+        )
 
         guard !stereo.isEmpty else { return }
 

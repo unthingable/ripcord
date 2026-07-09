@@ -8,7 +8,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     private let queue = DispatchQueue(label: "com.vibe.ripcord.systemaudio")
     deinit { stop() }
 
-    var onSamples: ((UnsafeBufferPointer<Float>) -> Void)?
+    var onSamples: ((UnsafeBufferPointer<Float>, AudioSampleTiming) -> Void)?
 
     /// Called before and after route-change restart so the owner can cycle
     /// other audio inputs (e.g. mic AUHAL) and avoid IOState escalation.
@@ -113,9 +113,9 @@ final class SystemAudioCapture: @unchecked Sendable {
         // Create the I/O proc to receive audio data
         var newProcID: AudioDeviceIOProcID?
         err = AudioDeviceCreateIOProcIDWithBlock(&newProcID, newDeviceID, queue) {
-            [weak self] _, inInputData, _, _, _ in
+            [weak self] _, inInputData, inInputTime, _, _ in
             guard let self else { return }
-            self.handleIOBlock(inputData: inInputData, callback: samplesCallback)
+            self.handleIOBlock(inputData: inInputData, inputTime: inInputTime.pointee, callback: samplesCallback)
         }
         guard err == noErr else {
             throw CaptureError.ioProcFailed(err)
@@ -249,7 +249,8 @@ final class SystemAudioCapture: @unchecked Sendable {
 
     private var ioBlockCount = 0
 
-    private func handleIOBlock(inputData: UnsafePointer<AudioBufferList>, callback: ((UnsafeBufferPointer<Float>) -> Void)?) {
+    private func handleIOBlock(inputData: UnsafePointer<AudioBufferList>, inputTime: AudioTimeStamp,
+                               callback: ((UnsafeBufferPointer<Float>, AudioSampleTiming) -> Void)?) {
         let bufferList = inputData.pointee
         let buf = bufferList.mBuffers
 
@@ -294,15 +295,17 @@ final class SystemAudioCapture: @unchecked Sendable {
             logger.error("IOBlock #\(self.ioBlockCount) frames=\(frameCount) ch=\(channelCount) peak=\(peak) converter=\(self.converter != nil)")
         }
 
+        let timing = AudioSampleTiming.from(inputTime, sampleRate: AudioConstants.sampleRate)
+
         if converter != nil {
             if let resampledCount = resample(frameCount: frameCount) {
                 resampleOutputBuffer.withUnsafeBufferPointer { ptr in
-                    callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount))
+                    callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount), timing)
                 }
             }
         } else {
             stereoBuffer.withUnsafeBufferPointer { ptr in
-                callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize))
+                callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize), timing)
             }
         }
     }

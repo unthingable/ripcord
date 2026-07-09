@@ -28,8 +28,11 @@ struct AudioInputDevice: Identifiable {
 @Observable
 final class AudioDeviceEnumerator {
     var inputDevices: [AudioInputDevice] = []
+    var defaultInputDeviceID: AudioDeviceID?
+    var onDevicesChanged: (([AudioInputDevice]) -> Void)?
 
-    private var listenerBlock: AudioObjectPropertyListenerBlock?
+    private var devicesListenerBlock: AudioObjectPropertyListenerBlock?
+    private var defaultInputListenerBlock: AudioObjectPropertyListenerBlock?
     private let audioQueue = DispatchQueue(label: "com.vibe.ripcord.deviceEnum")
 
     init() {
@@ -43,6 +46,8 @@ final class AudioDeviceEnumerator {
 
     func refresh() {
         inputDevices = computeDevices()
+        defaultInputDeviceID = Self.currentDefaultInputDeviceID()
+        onDevicesChanged?(inputDevices)
     }
 
     /// Query CoreAudio for all input devices. Pure computation, no UI side effects.
@@ -89,6 +94,24 @@ final class AudioDeviceEnumerator {
 
     func deviceID(forUID uid: String) -> AudioDeviceID? {
         inputDevices.first(where: { $0.uid == uid })?.id
+    }
+
+    static func currentDefaultInputDeviceID() -> AudioDeviceID? {
+        var address = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
+            mScope: kAudioObjectPropertyScopeGlobal,
+            mElement: kAudioObjectPropertyElementMain
+        )
+        var deviceID: AudioDeviceID = 0
+        var size = UInt32(MemoryLayout<AudioDeviceID>.size)
+        let status = AudioObjectGetPropertyData(
+            AudioObjectID(kAudioObjectSystemObject),
+            &address, 0, nil, &size, &deviceID
+        )
+        guard status == noErr, deviceID != kAudioObjectUnknown, deviceID != 0 else {
+            return nil
+        }
+        return deviceID
     }
 
     // MARK: - Private
@@ -170,27 +193,61 @@ final class AudioDeviceEnumerator {
             // CoreAudio queries run here on audioQueue (off main).
             // Only the final inputDevices assignment goes to main.
             let devices = s.computeDevices()
+            let defaultID = Self.currentDefaultInputDeviceID()
             DispatchQueue.main.async {
                 s.inputDevices = devices
+                s.defaultInputDeviceID = defaultID
+                s.onDevicesChanged?(devices)
             }
         }
-        listenerBlock = block
+        devicesListenerBlock = block
 
         AudioObjectAddPropertyListenerBlock(
             AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
         )
-    }
 
-    private func removeHotplugListener() {
-        guard let block = listenerBlock else { return }
-        var address = AudioObjectPropertyAddress(
-            mSelector: kAudioHardwarePropertyDevices,
+        var defaultAddress = AudioObjectPropertyAddress(
+            mSelector: kAudioHardwarePropertyDefaultInputDevice,
             mScope: kAudioObjectPropertyScopeGlobal,
             mElement: kAudioObjectPropertyElementMain
         )
-        AudioObjectRemovePropertyListenerBlock(
-            AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
+        let defaultBlock: AudioObjectPropertyListenerBlock = { [weak self] _, _ in
+            guard let self else { return }
+            nonisolated(unsafe) let s = self
+            let defaultID = Self.currentDefaultInputDeviceID()
+            DispatchQueue.main.async {
+                s.defaultInputDeviceID = defaultID
+                s.onDevicesChanged?(s.inputDevices)
+            }
+        }
+        defaultInputListenerBlock = defaultBlock
+        AudioObjectAddPropertyListenerBlock(
+            AudioObjectID(kAudioObjectSystemObject), &defaultAddress, audioQueue, defaultBlock
         )
-        listenerBlock = nil
+    }
+
+    private func removeHotplugListener() {
+        if let block = devicesListenerBlock {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDevices,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
+            )
+            devicesListenerBlock = nil
+        }
+        if let block = defaultInputListenerBlock {
+            var address = AudioObjectPropertyAddress(
+                mSelector: kAudioHardwarePropertyDefaultInputDevice,
+                mScope: kAudioObjectPropertyScopeGlobal,
+                mElement: kAudioObjectPropertyElementMain
+            )
+            AudioObjectRemovePropertyListenerBlock(
+                AudioObjectID(kAudioObjectSystemObject), &address, audioQueue, block
+            )
+            defaultInputListenerBlock = nil
+        }
     }
 }

@@ -27,6 +27,10 @@ struct ContentView: View {
             .padding(8)
             .frame(width: 320)
             .background(Color(nsColor: .windowBackgroundColor))
+            .transaction { transaction in
+                transaction.animation = nil
+                transaction.disablesAnimations = true
+            }
             .overlay(alignment: .bottom) {
                 if !manager.recentRecordings.isEmpty {
                     resizeHandle
@@ -93,7 +97,7 @@ struct ContentView: View {
                     }
                     .font(.caption)
                     .disabled(manager.transcriptionService.isTranscribing)
-                    .popover(isPresented: $showFileTranscribePopover, arrowEdge: .top) {
+                    .instantPopover(isPresented: $showFileTranscribePopover, arrowEdge: .top) {
                         TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
                             showFileTranscribePopover = false
                             if let url = fileTranscribeURL {
@@ -603,8 +607,8 @@ struct ContentView: View {
     // MARK: - Per-device input gain (dB)
 
     @ViewBuilder
-    private func inputGainField(for device: AudioInputDevice) -> some View {
-        InputGainField(manager: manager, device: device)
+    private func inputControls(for device: AudioInputDevice) -> some View {
+        MicInputControls(manager: manager, device: device)
     }
 
     // MARK: - Channel-mode picker (multi-channel mic devices)
@@ -739,10 +743,8 @@ struct ContentView: View {
                 channelModePicker(for: device)
             }
 
-            // Per-device input gain (dB). USB instrument/line inputs commonly
-            // need +20..+60 dB to reach normal recording levels.
             if let device = manager.currentSelectedMicDevice() {
-                inputGainField(for: device)
+                inputControls(for: device)
             }
 
             VStack(spacing: 2) {
@@ -777,7 +779,6 @@ struct ContentView: View {
                         .frame(width: 8, height: 8)
                 }
                 .frame(height: 10)
-                .animation(.easeInOut(duration: 0.2), value: split)
                 Toggle(isOn: Binding(
                     get: { !manager.channelSplit },
                     set: { manager.updateChannelSplit(!$0) }
@@ -873,7 +874,6 @@ struct ContentView: View {
             .fill(.secondary.opacity(resizeHovering ? 0.65 : 0.4))
             .frame(width: resizeHovering ? 48 : 36, height: 3)
             .padding(.bottom, 3)
-            .animation(.easeInOut(duration: 0.15), value: resizeHovering)
             .allowsHitTesting(false)
     }
 
@@ -1067,7 +1067,7 @@ private struct RecordingRowView: View {
                     }
                     .buttonStyle(.plain)
                     .help(newCount > 0 ? "Name new speakers" : "Confirm speaker identification")
-                    .popover(isPresented: $showSpeakerNaming, arrowEdge: .trailing) {
+                    .instantPopover(isPresented: $showSpeakerNaming, arrowEdge: .trailing) {
                         SpeakerNamingPopover(
                             fileURL: recording.url,
                             service: manager.transcriptionService
@@ -1100,7 +1100,7 @@ private struct RecordingRowView: View {
                         .buttonStyle(.plain)
                         .disabled(manager.transcriptionService.isTranscribing)
                         .help(transcriptExists() ? "Re-transcribe" : "Transcribe")
-                        .popover(isPresented: Binding(
+                        .instantPopover(isPresented: Binding(
                             get: { transcribeTarget?.url == recording.url },
                             set: { if !$0 { transcribeTarget = nil } }
                         ), arrowEdge: .trailing) {
@@ -1535,69 +1535,389 @@ struct TranscriptionConfigForm: View {
     }
 }
 
-private struct InputGainField: View {
+private struct MicInputControls: View {
     @Bindable var manager: RecordingManager
     let device: AudioInputDevice
 
-    @State private var text: String = ""
+    @State private var showLatency = false
+    @State private var showGain = false
+
+    var body: some View {
+        HStack(spacing: 4) {
+            Button {
+                showLatency.toggle()
+            } label: {
+                controlChip(
+                    text: latencyLabel,
+                    active: latencyActive,
+                    tint: .blue
+                )
+            }
+            .buttonStyle(.plain)
+            .instantPopover(isPresented: $showLatency, arrowEdge: .bottom) {
+                LatencyControlPanel(manager: manager, device: device)
+                    .padding(10)
+                    .frame(width: 260)
+            }
+            .help("Latency compensation")
+
+            Button {
+                showGain.toggle()
+            } label: {
+                controlChip(
+                    text: "\(Self.formatSigned(manager.currentMicGainDB())) dB",
+                    active: abs(manager.currentMicGainDB()) > 0.05,
+                    tint: .green
+                )
+            }
+            .buttonStyle(.plain)
+            .instantPopover(isPresented: $showGain, arrowEdge: .bottom) {
+                GainControlPanel(manager: manager, device: device)
+                    .padding(10)
+                    .frame(width: 240)
+            }
+            .help("Input gain")
+        }
+        .opacity(manager.micEnabled ? 1 : 0.4)
+    }
+
+    private var latencyActive: Bool {
+        let settings = manager.currentMicLatencySettings()
+        return settings.autoEnabled || abs(manager.currentEffectiveMicLatencyOffsetMs()) > 0.5
+    }
+
+    private var latencyLabel: String {
+        let settings = manager.currentMicLatencySettings()
+        let value = manager.currentEffectiveMicLatencyOffsetMs()
+        if settings.autoEnabled {
+            return "Auto \(Self.formatSigned(value))"
+        }
+        if abs(value) <= 0.5 {
+            return "Lat Off"
+        }
+        return "Lat \(Self.formatSigned(value))"
+    }
+
+    private func controlChip(text: String, active: Bool, tint: Color) -> some View {
+        Text(text)
+            .font(.caption2.weight(.medium))
+            .monospacedDigit()
+            .lineLimit(1)
+            .padding(.horizontal, 5)
+            .padding(.vertical, 2)
+            .background(
+                RoundedRectangle(cornerRadius: 4)
+                    .fill(active ? tint.opacity(0.18) : Color.secondary.opacity(0.15))
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: 4)
+                    .stroke(active ? tint.opacity(0.65) : .clear, lineWidth: 1)
+            )
+            .contentShape(RoundedRectangle(cornerRadius: 4))
+    }
+
+    static func formatSigned(_ value: Double) -> String {
+        let rounded = abs(value.rounded() - value) < 0.05 ? String(Int(value.rounded())) : String(format: "%.1f", value)
+        if value > 0 { return "+\(rounded)" }
+        return rounded
+    }
+}
+
+private struct LatencyControlPanel: View {
+    @Bindable var manager: RecordingManager
+    let device: AudioInputDevice
+
+    @State private var text = ""
     @FocusState private var focused: Bool
 
     var body: some View {
-        HStack(spacing: 2) {
-            TextField("0", text: $text)
-                .textFieldStyle(.plain)
-                .multilineTextAlignment(.trailing)
-                .font(.caption2.weight(.medium))
-                .frame(width: 34)
-                .padding(.horizontal, 4)
-                .padding(.vertical, 2)
-                .background(
-                    RoundedRectangle(cornerRadius: 4)
-                        .fill(Color.secondary.opacity(0.15))
-                )
-                .focused($focused)
-                .onSubmit(commit)
-                .onChange(of: focused) { _, isFocused in
-                    if isFocused {
-                        if text.isEmpty {
-                            text = Self.format(manager.currentMicGainDB())
-                        }
-                    } else {
-                        commit()
+        VStack(alignment: .leading, spacing: 10) {
+            Toggle("Auto compensation", isOn: Binding(
+                get: { manager.currentMicLatencySettings().autoEnabled },
+                set: { manager.updateMicLatencyAutoEnabled($0, forUID: device.uid) }
+            ))
+
+            HStack {
+                Text(manager.currentMicLatencySettings().autoEnabled ? "Trim" : "Offset")
+                Slider(value: valueBinding, in: -250...250, step: 1)
+                TextField("0", text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .frame(width: 58)
+                    .focused($focused)
+                    .onSubmit(commit)
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { commit() }
                     }
-                }
-            Text("dB")
-                .font(.caption2)
-                .foregroundStyle(.secondary)
-        }
-        .help("Input gain. USB instrument/line inputs commonly need +20..+60 dB.")
-        .opacity(manager.micEnabled ? 1 : 0.4)
-        .onAppear { syncFromStore() }
-        .onChange(of: device.uid) { _, _ in syncFromStore() }
-        .onChange(of: manager.currentMicGainDB()) { _, _ in
-            if !focused {
-                syncFromStore()
+                Text("ms")
+                    .foregroundStyle(.secondary)
             }
+
+            if let estimate = manager.currentMicLatencyEstimate() {
+                Text("Estimate \(MicInputControls.formatSigned(estimate.totalMs)) ms\(estimate.isPartial ? " partial" : "")")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("No CoreAudio latency estimate available")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text("Effective \(MicInputControls.formatSigned(manager.currentEffectiveMicLatencyOffsetMs())) ms")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Reset") { reset() }
+                    .controlSize(.small)
+            }
+        }
+        .onAppear { syncText() }
+        .onChange(of: manager.currentMicLatencySettings()) { _, _ in syncTextIfNeeded() }
+        .onChange(of: device.uid) { _, _ in syncText() }
+    }
+
+    private var valueBinding: Binding<Double> {
+        Binding(
+            get: {
+                let settings = manager.currentMicLatencySettings()
+                return settings.autoEnabled ? settings.manualTrimMs : settings.manualOffsetMs
+            },
+            set: { value in
+                let settings = manager.currentMicLatencySettings()
+                if settings.autoEnabled {
+                    manager.updateMicLatencyManualTrimMs(value, forUID: device.uid)
+                } else {
+                    manager.updateMicLatencyManualOffsetMs(value, forUID: device.uid)
+                }
+                text = Self.format(value)
+            }
+        )
+    }
+
+    private func commit() {
+        let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !trimmed.isEmpty, trimmed != "-", trimmed != "+", trimmed != "." else {
+            syncText()
+            return
+        }
+        guard let value = Double(trimmed) else {
+            syncText()
+            return
+        }
+        valueBinding.wrappedValue = MicLatencyStore.clamp(value)
+        syncText()
+    }
+
+    private func reset() {
+        if manager.currentMicLatencySettings().autoEnabled {
+            manager.updateMicLatencyManualTrimMs(0, forUID: device.uid)
+        } else {
+            manager.updateMicLatencyManualOffsetMs(0, forUID: device.uid)
+        }
+        syncText()
+    }
+
+    private func syncTextIfNeeded() {
+        if !focused { syncText() }
+    }
+
+    private static func format(_ value: Double) -> String {
+        if value.rounded() == value {
+            return String(Int(value))
+        }
+        return String(format: "%.1f", value)
+    }
+
+    private func syncText() {
+        text = Self.format(valueBinding.wrappedValue)
+    }
+}
+
+private extension View {
+    func instantPopover<PopoverContent: View>(
+        isPresented: Binding<Bool>,
+        arrowEdge: Edge,
+        @ViewBuilder content: @escaping () -> PopoverContent
+    ) -> some View {
+        overlay {
+            InstantPopoverPresenter(
+                isPresented: isPresented,
+                arrowEdge: arrowEdge,
+                content: { AnyView(content()) }
+            )
+            .allowsHitTesting(false)
+        }
+    }
+}
+
+private struct InstantPopoverPresenter: NSViewRepresentable {
+    @Binding var isPresented: Bool
+    let arrowEdge: Edge
+    let content: () -> AnyView
+
+    func makeCoordinator() -> Coordinator {
+        Coordinator(isPresented: $isPresented)
+    }
+
+    func makeNSView(context: Context) -> NSView {
+        NSView()
+    }
+
+    func updateNSView(_ nsView: NSView, context: Context) {
+        context.coordinator.isPresented = $isPresented
+
+        if isPresented {
+            let popover = context.coordinator.popover ?? context.coordinator.makePopover()
+            let controller = context.coordinator.hostingController ?? context.coordinator.makeHostingController()
+            controller.rootView = content()
+            popover.contentViewController = controller
+
+            guard !popover.isShown else { return }
+            if nsView.window != nil {
+                show(popover, anchoredTo: nsView)
+            } else {
+                DispatchQueue.main.async {
+                    guard isPresented, nsView.window != nil, !popover.isShown else { return }
+                    show(popover, anchoredTo: nsView)
+                }
+            }
+        } else if context.coordinator.popover?.isShown == true {
+            context.coordinator.closeFromBinding()
+        }
+    }
+
+    private func show(_ popover: NSPopover, anchoredTo nsView: NSView) {
+        popover.show(
+            relativeTo: nsView.bounds,
+            of: nsView,
+            preferredEdge: arrowEdge.nsRectEdge
+        )
+    }
+
+    @MainActor
+    final class Coordinator: NSObject, NSPopoverDelegate {
+        var isPresented: Binding<Bool>
+        var popover: NSPopover?
+        var hostingController: NSHostingController<AnyView>?
+        private var closingFromBinding = false
+
+        init(isPresented: Binding<Bool>) {
+            self.isPresented = isPresented
+        }
+
+        func makePopover() -> NSPopover {
+            let popover = NSPopover()
+            popover.animates = false
+            popover.behavior = .transient
+            popover.delegate = self
+            self.popover = popover
+            return popover
+        }
+
+        func makeHostingController() -> NSHostingController<AnyView> {
+            let controller = NSHostingController(rootView: AnyView(EmptyView()))
+            hostingController = controller
+            return controller
+        }
+
+        func closeFromBinding() {
+            closingFromBinding = true
+            popover?.close()
+            closingFromBinding = false
+        }
+
+        func popoverDidClose(_ notification: Notification) {
+            guard !closingFromBinding else { return }
+            DispatchQueue.main.async {
+                self.isPresented.wrappedValue = false
+            }
+        }
+    }
+}
+
+private extension Edge {
+    var nsRectEdge: NSRectEdge {
+        switch self {
+        case .top:
+            .minY
+        case .bottom:
+            .maxY
+        case .leading:
+            .maxX
+        case .trailing:
+            .minX
+        }
+    }
+}
+
+private struct GainControlPanel: View {
+    @Bindable var manager: RecordingManager
+    let device: AudioInputDevice
+
+    @State private var text = ""
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        VStack(alignment: .leading, spacing: 10) {
+            HStack {
+                Text("Gain")
+                Slider(value: Binding(
+                    get: { manager.currentMicGainDB() },
+                    set: {
+                        manager.updateMicGainDB($0, forUID: device.uid)
+                        text = Self.format($0)
+                    }
+                ), in: -60...80, step: 1)
+                TextField("0", text: $text)
+                    .textFieldStyle(.roundedBorder)
+                    .multilineTextAlignment(.trailing)
+                    .monospacedDigit()
+                    .frame(width: 58)
+                    .focused($focused)
+                    .onSubmit(commit)
+                    .onChange(of: focused) { _, isFocused in
+                        if !isFocused { commit() }
+                    }
+                Text("dB")
+                    .foregroundStyle(.secondary)
+            }
+
+            HStack {
+                Text(abs(manager.currentMicGainDB()) > 0.05 ? "Non-unity input gain" : "Unity gain")
+                    .font(.caption2)
+                    .foregroundStyle(.secondary)
+                Spacer()
+                Button("Reset") {
+                    manager.updateMicGainDB(0, forUID: device.uid)
+                    syncText()
+                }
+                .controlSize(.small)
+            }
+        }
+        .onAppear { syncText() }
+        .onChange(of: device.uid) { _, _ in syncText() }
+        .onChange(of: manager.currentMicGainDB()) { _, _ in
+            if !focused { syncText() }
         }
     }
 
     private func commit() {
         let trimmed = text.trimmingCharacters(in: .whitespacesAndNewlines)
         guard !trimmed.isEmpty, trimmed != "-", trimmed != "+", trimmed != "." else {
-            syncFromStore()
+            syncText()
             return
         }
-
         guard let value = Double(trimmed) else {
-            syncFromStore()
+            syncText()
             return
         }
-
         manager.updateMicGainDB(value, forUID: device.uid)
-        syncFromStore()
+        syncText()
     }
 
-    private func syncFromStore() {
+    private func syncText() {
         text = Self.format(manager.currentMicGainDB())
     }
 

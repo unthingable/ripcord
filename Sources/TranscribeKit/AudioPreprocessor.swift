@@ -19,24 +19,36 @@ public enum AudioPreprocessor {
     /// Extract audio track from a video/media file to a temporary PCM WAV.
     /// Prefers ffmpeg when available (handles problematic containers more robustly),
     /// falls back to AVAssetReader in time-ranged chunks.
-    public static func extractAudio(from url: URL) async throws -> (url: URL, cleanup: () -> Void) {
+    public static func extractAudio(
+        from url: URL,
+        startTime: Double? = nil,
+        endTime: Double? = nil
+    ) async throws -> (url: URL, cleanup: () -> Void) {
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("transcribekit-extract-\(UUID().uuidString).wav")
         let cleanup: () -> Void = { try? FileManager.default.removeItem(at: tempURL) }
 
         // Prefer ffmpeg — AVAssetReader can silently fail mid-file on long/complex containers
-        if await extractWithFFmpeg(from: url, to: tempURL) {
+        if await extractWithFFmpeg(
+            from: url, to: tempURL, startTime: startTime, endTime: endTime)
+        {
             return (tempURL, cleanup: cleanup)
         }
 
         // Fall back to AVAssetReader in time-ranged chunks
-        try await extractWithAssetReader(from: url, to: tempURL)
+        try await extractWithAssetReader(
+            from: url, to: tempURL, startTime: startTime, endTime: endTime)
         return (tempURL, cleanup: cleanup)
     }
 
     // MARK: - ffmpeg extraction
 
-    private static func extractWithFFmpeg(from url: URL, to outputURL: URL) async -> Bool {
+    private static func extractWithFFmpeg(
+        from url: URL,
+        to outputURL: URL,
+        startTime: Double?,
+        endTime: Double?
+    ) async -> Bool {
         let searchPaths = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
         guard let path = searchPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
             return false
@@ -44,8 +56,16 @@ public enum AudioPreprocessor {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
-        process.arguments = [
-            "-i", url.path,
+        var arguments = ["-i", url.path]
+        if let startTime, startTime > 0 {
+            arguments += ["-ss", String(startTime)]
+        }
+        if let endTime {
+            let duration = endTime - (startTime ?? 0)
+            guard duration > 0 else { return false }
+            arguments += ["-t", String(duration)]
+        }
+        arguments += [
             "-vn",                // discard video
             "-ac", "1",           // mono
             "-ar", "16000",       // 16 kHz
@@ -54,6 +74,7 @@ public enum AudioPreprocessor {
             "-y",                 // overwrite
             outputURL.path,
         ]
+        process.arguments = arguments
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
@@ -85,7 +106,12 @@ public enum AudioPreprocessor {
 
     // MARK: - AVAssetReader extraction (fallback)
 
-    private static func extractWithAssetReader(from url: URL, to outputURL: URL) async throws {
+    private static func extractWithAssetReader(
+        from url: URL,
+        to outputURL: URL,
+        startTime: Double?,
+        endTime: Double?
+    ) async throws {
         let asset = AVAsset(url: url)
         let audioTracks = try await asset.loadTracks(withMediaType: .audio)
         guard let audioTrack = audioTracks.first else {
@@ -96,6 +122,10 @@ public enum AudioPreprocessor {
         guard totalDuration > 0 else {
             throw AudioPreprocessorError.exportFailed("File has zero duration")
         }
+        let rangeStart = min(totalDuration, max(0, startTime ?? 0))
+        let rangeEnd = min(totalDuration, max(rangeStart, endTime ?? totalDuration))
+        let rangeDuration = rangeEnd - rangeStart
+        guard rangeDuration > 0 else { throw AudioPreprocessorError.invalidTimeRange }
 
         let outputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
@@ -113,11 +143,11 @@ public enum AudioPreprocessor {
         // Process in time-ranged chunks — a fresh AVAssetReader per chunk avoids
         // internal resource limits that cause silent mid-file failures.
         let chunkSeconds: Double = 300
-        var offset: Double = 0
+        var offset = rangeStart
         var totalFrames: UInt64 = 0
 
-        while offset < totalDuration {
-            let duration = min(chunkSeconds, totalDuration - offset)
+        while offset < rangeEnd {
+            let duration = min(chunkSeconds, rangeEnd - offset)
             let timeRange = CMTimeRange(
                 start: CMTime(seconds: offset, preferredTimescale: 600),
                 duration: CMTime(seconds: duration, preferredTimescale: 600))
@@ -164,9 +194,9 @@ public enum AudioPreprocessor {
         }
 
         let actualDuration = Double(totalFrames) / 16000.0
-        if actualDuration / totalDuration < 0.9 {
+        if actualDuration / rangeDuration < 0.9 {
             throw AudioPreprocessorError.exportFailed(
-                "Extracted \(Int(actualDuration))s of \(Int(totalDuration))s")
+                "Extracted \(Int(actualDuration))s of \(Int(rangeDuration))s")
         }
     }
 
@@ -214,12 +244,13 @@ public enum AudioPreprocessor {
 
         let format = audioFile.processingFormat
         let sampleRate = format.sampleRate
-        let totalFrames = AVAudioFrameCount(audioFile.length)
+        let totalFrames = audioFile.length
 
         let needsTrim = startTime != nil || endTime != nil
         let needsMono = format.channelCount > 1
+        let needsResample = format.sampleRate != 16000
 
-        guard needsTrim || needsMono else {
+        guard needsTrim || needsMono || needsResample else {
             if let extractCleanup {
                 // Extracted file is already the right format — return it with its cleanup
                 return (URL(fileURLWithPath: audioFile.url.path), cleanup: extractCleanup)
@@ -227,88 +258,34 @@ public enum AudioPreprocessor {
             return (url, cleanup: {})
         }
 
-        // Compute frame range for trimming
-        let startFrame = AVAudioFramePosition(
-            min(Double(totalFrames), max(0, (startTime ?? 0) * sampleRate)))
-        let endFrame = AVAudioFramePosition(
-            min(Double(totalFrames), max(Double(startFrame), (endTime ?? Double(totalFrames) / sampleRate) * sampleRate)))
-        let frameCount = AVAudioFrameCount(endFrame - startFrame)
-
-        guard frameCount > 0 else {
+        let requestedStart = startTime ?? 0
+        let requestedEnd = endTime ?? (Double(totalFrames) / sampleRate)
+        guard requestedStart.isFinite, requestedEnd.isFinite, sampleRate.isFinite, sampleRate > 0 else {
             extractCleanup?()
-            return (url, cleanup: {})
+            throw AudioPreprocessorError.invalidTimeRange
         }
-
-        audioFile.framePosition = startFrame
-        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: frameCount) else {
+        guard requestedEnd > requestedStart else {
             extractCleanup?()
-            return (url, cleanup: {})
-        }
-        try audioFile.read(into: buffer, frameCount: frameCount)
-        // Done with extracted file if any
-        extractCleanup?()
-
-        guard let channelData = buffer.floatChannelData else {
-            return (url, cleanup: {})
+            throw AudioPreprocessorError.invalidTimeRange
         }
 
-        let channelCount = Int(format.channelCount)
-        let sampleCount = Int(buffer.frameLength)
-
-        guard let monoFormat = AVAudioFormat(
-            commonFormat: .pcmFormatFloat32,
-            sampleRate: format.sampleRate,
-            channels: 1,
-            interleaved: false
-        ) else {
-            return (url, cleanup: {})
+        let sourceURL = URL(fileURLWithPath: audioFile.url.path)
+        do {
+            let result = try await extractAudio(
+                from: sourceURL, startTime: startTime, endTime: endTime)
+            extractCleanup?()
+            return result
+        } catch {
+            extractCleanup?()
+            throw error
         }
-
-        guard let monoBuffer = AVAudioPCMBuffer(pcmFormat: monoFormat, frameCapacity: frameCount)
-        else {
-            return (url, cleanup: {})
-        }
-        monoBuffer.frameLength = AVAudioFrameCount(sampleCount)
-
-        guard let monoSamples = monoBuffer.floatChannelData?[0] else {
-            return (url, cleanup: {})
-        }
-
-        // Mix to mono (average all channels)
-        let scale = 1.0 / Float(channelCount)
-        for i in 0..<sampleCount {
-            var sum: Float = 0
-            for ch in 0..<channelCount {
-                sum += channelData[ch][i]
-            }
-            monoSamples[i] = sum * scale
-        }
-
-        // Normalize to peak amplitude
-        var peak: Float = 0
-        for i in 0..<sampleCount {
-            let abs = Swift.abs(monoSamples[i])
-            if abs > peak { peak = abs }
-        }
-        if peak > 0.01 && peak < 0.95 {
-            let gain = 1.0 / peak
-            for i in 0..<sampleCount {
-                monoSamples[i] *= gain
-            }
-        }
-
-        let tempURL = FileManager.default.temporaryDirectory
-            .appendingPathComponent("transcribekit-mono-\(UUID().uuidString).wav")
-        let outputFile = try AVAudioFile(forWriting: tempURL, settings: monoFormat.settings)
-        try outputFile.write(from: monoBuffer)
-
-        return (tempURL, cleanup: { try? FileManager.default.removeItem(at: tempURL) })
     }
 }
 
 public enum AudioPreprocessorError: LocalizedError {
     case noAudioTrack
     case exportFailed(String?)
+    case invalidTimeRange
 
     public var errorDescription: String? {
         switch self {
@@ -316,6 +293,8 @@ public enum AudioPreprocessorError: LocalizedError {
         case .exportFailed(let detail):
             if let detail { return "Failed to extract audio: \(detail)" }
             return "Failed to extract audio from file"
+        case .invalidTimeRange:
+            return "The requested transcription time range is invalid"
         }
     }
 }

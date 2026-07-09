@@ -20,7 +20,7 @@ private func micDeviceIOProc(
 ) -> OSStatus {
     guard let inClientData else { return noErr }
     let capture = Unmanaged<MicrophoneCapture>.fromOpaque(inClientData).takeUnretainedValue()
-    capture.handleIOInput(inputData: inInputData)
+    capture.handleIOInput(inputData: inInputData, inputTime: inInputTime.pointee)
     return noErr
 }
 
@@ -95,7 +95,7 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     // Captured at start() so the IO callback avoids a data race on onSamples.
     // Emitted samples are always stereo-interleaved at 48 kHz.
-    private var capturedCallback: ((UnsafeBufferPointer<Float>) -> Void)?
+    private var capturedCallback: ((UnsafeBufferPointer<Float>, AudioSampleTiming) -> Void)?
 
     // Diagnostic: track render errors from the IO thread
     private var renderErrorCount = 0
@@ -110,7 +110,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     private var nativeDebugFile: ExtAudioFileRef?
     private var nativeDebugChannels = 0
 
-    var onSamples: ((UnsafeBufferPointer<Float>) -> Void)?
+    var onSamples: ((UnsafeBufferPointer<Float>, AudioSampleTiming) -> Void)?
 
     var isRunning: Bool {
         stateLock.withLock { _isRunning }
@@ -213,7 +213,7 @@ final class MicrophoneCapture: @unchecked Sendable {
         let effectiveDeviceID: AudioDeviceID
         if let deviceID {
             effectiveDeviceID = deviceID
-        } else if let defaultID = Self.currentDefaultInputDeviceID() {
+        } else if let defaultID = AudioDeviceEnumerator.currentDefaultInputDeviceID() {
             effectiveDeviceID = defaultID
         } else {
             throw DeviceError.formatNotReady
@@ -554,7 +554,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// non-interleaved (N buffers, each mNumberChannels=1) layouts — CoreAudio
     /// USB drivers can deliver either depending on the device's preferred
     /// physical/virtual format.
-    func handleIOInput(inputData: UnsafePointer<AudioBufferList>) {
+    func handleIOInput(inputData: UnsafePointer<AudioBufferList>, inputTime: AudioTimeStamp) {
         let abl = UnsafeMutableAudioBufferListPointer(UnsafeMutablePointer(mutating: inputData))
         let nBuffers = abl.count
         guard nBuffers > 0 else { return }
@@ -627,7 +627,8 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
         }
 
-        processNativeInput(frameCount: frameCount, nativeChannels: nativeChannels, source: "IOProc")
+        let timing = AudioSampleTiming.from(inputTime, sampleRate: deviceSampleRate)
+        processNativeInput(frameCount: frameCount, nativeChannels: nativeChannels, source: "IOProc", timing: timing)
     }
 
     func handleAUHALInput(
@@ -674,11 +675,12 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
         }
 
-        processNativeInput(frameCount: frames, nativeChannels: nativeChannels, source: "AUHAL")
+        let timing = AudioSampleTiming.from(timeStamp.pointee, sampleRate: deviceSampleRate)
+        processNativeInput(frameCount: frames, nativeChannels: nativeChannels, source: "AUHAL", timing: timing)
         return noErr
     }
 
-    private func processNativeInput(frameCount: Int, nativeChannels: Int, source: String) {
+    private func processNativeInput(frameCount: Int, nativeChannels: Int, source: String, timing: AudioSampleTiming) {
         let nativeBufferSize = frameCount * nativeChannels
 
         if let nativeDebugHandoff {
@@ -720,13 +722,25 @@ final class MicrophoneCapture: @unchecked Sendable {
 
         if resamplerActive {
             if let resampledCount = resample(frameCount: frameCount) {
+                let outTiming = AudioSampleTiming(
+                    hostTime: timing.hostTime,
+                    sampleTime: timing.sampleTime,
+                    sampleRate: AudioConstants.sampleRate,
+                    channelsPerFrame: CircularAudioBuffer.channelsPerFrame
+                )
                 resampleOutputBuffer.withUnsafeBufferPointer { ptr in
-                    capturedCallback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount))
+                    capturedCallback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount), outTiming)
                 }
             }
         } else {
+            let outTiming = AudioSampleTiming(
+                hostTime: timing.hostTime,
+                sampleTime: timing.sampleTime,
+                sampleRate: AudioConstants.sampleRate,
+                channelsPerFrame: CircularAudioBuffer.channelsPerFrame
+            )
             extractedBuffer.withUnsafeBufferPointer { ptr in
-                capturedCallback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize))
+                capturedCallback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize), outTiming)
             }
         }
     }
