@@ -54,6 +54,9 @@ struct RipcordApp: App {
             ContentView(manager: manager)
         } label: {
             Image(nsImage: menubarIcon)
+                .accessibilityElement(children: .ignore)
+                .accessibilityLabel("Ripcord")
+                .accessibilityValue(menuBarAccessibilityState)
         }
         .menuBarExtraStyle(.window)
 
@@ -82,6 +85,23 @@ struct RipcordApp: App {
         }
 
         return inputColoredIcon(innerTint: innerTint)
+    }
+
+    private var menuBarAccessibilityState: String {
+        switch manager.state {
+        case .starting:
+            return "Starting"
+        case .buffering:
+            return manager.liveTranscriptEnabled && manager.liveTranscriptStream != nil
+                ? "Buffering audio; Live Transcript active"
+                : "Buffering audio"
+        case .recording:
+            return manager.isSilencePaused ? "Recording; paused for silence" : "Recording"
+        case .paused:
+            return "Recording paused"
+        case .error(let message):
+            return "Error: \(message)"
+        }
     }
 
     private func statusSymbol(_ name: String, tint: NSColor) -> NSImage {

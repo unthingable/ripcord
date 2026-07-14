@@ -21,6 +21,12 @@ final class AudioTimelineAligner {
         nextOutputFrame = 0
     }
 
+    func prime(system: [AudioSampleChunk], mic: [AudioSampleChunk], micAdvanceFrames: Int) {
+        systemChunks.append(contentsOf: system)
+        micChunks.append(contentsOf: mic.map { $0.shiftedStart(by: -Int64(micAdvanceFrames)) })
+        establishBaseline()
+    }
+
     func append(system newSystem: [AudioSampleChunk], mic newMic: [AudioSampleChunk],
                 micAdvanceFrames: Int, split: Bool, force: Bool) -> [Float] {
         systemChunks.append(contentsOf: newSystem)

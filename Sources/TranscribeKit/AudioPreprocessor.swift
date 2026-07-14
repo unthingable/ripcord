@@ -2,6 +2,32 @@
 import Foundation
 
 public enum AudioPreprocessor {
+    private struct TimeRange: Sendable {
+        let start: Double
+        let end: Double
+    }
+
+    /// Serializes cancellation with the currently active reader. AVAssetReader's
+    /// cancellation is synchronous, so the decoding loop also checks the task.
+    private final class ReaderCancellation: @unchecked Sendable {
+        private let lock = NSLock()
+        private var reader: AVAssetReader?
+
+        func set(_ reader: AVAssetReader) {
+            lock.withLock { self.reader = reader }
+        }
+
+        func clear(_ reader: AVAssetReader) {
+            lock.withLock {
+                if self.reader === reader { self.reader = nil }
+            }
+        }
+
+        func cancel() {
+            lock.withLock { reader?.cancelReading() }
+        }
+    }
+
     /// Get the audio duration from the file directly.
     public static func getAudioDuration(_ url: URL) async -> TimeInterval {
         do {
@@ -24,21 +50,109 @@ public enum AudioPreprocessor {
         startTime: Double? = nil,
         endTime: Double? = nil
     ) async throws -> (url: URL, cleanup: () -> Void) {
+        let range = try await validatedTimeRange(for: url, startTime: startTime, endTime: endTime)
         let tempURL = FileManager.default.temporaryDirectory
             .appendingPathComponent("transcribekit-extract-\(UUID().uuidString).wav")
         let cleanup: () -> Void = { try? FileManager.default.removeItem(at: tempURL) }
+        var succeeded = false
+        defer {
+            if !succeeded { cleanup() }
+        }
 
         // Prefer ffmpeg — AVAssetReader can silently fail mid-file on long/complex containers
-        if await extractWithFFmpeg(
-            from: url, to: tempURL, startTime: startTime, endTime: endTime)
+        if try await extractWithFFmpeg(from: url, to: tempURL, range: range)
         {
+            try Task.checkCancellation()
+            try normalizeWAVInPlace(tempURL)
+            succeeded = true
             return (tempURL, cleanup: cleanup)
         }
 
         // Fall back to AVAssetReader in time-ranged chunks
-        try await extractWithAssetReader(
-            from: url, to: tempURL, startTime: startTime, endTime: endTime)
+        try await extractWithAssetReader(from: url, to: tempURL, range: range)
+        try Task.checkCancellation()
+        try normalizeWAVInPlace(tempURL)
+        succeeded = true
         return (tempURL, cleanup: cleanup)
+    }
+
+    private static func normalizeWAVInPlace(_ url: URL) throws {
+        let input = try AVAudioFile(forReading: url)
+        let format = input.processingFormat
+        let capacity: AVAudioFrameCount = 65_536
+        guard let scanBuffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            throw AudioPreprocessorError.exportFailed("Could not allocate normalization buffer")
+        }
+
+        var peak: Float = 0
+        while input.framePosition < input.length {
+            try Task.checkCancellation()
+            try input.read(into: scanBuffer, frameCount: capacity)
+            guard let channels = scanBuffer.floatChannelData else { break }
+            for channel in 0..<Int(format.channelCount) {
+                for frame in 0..<Int(scanBuffer.frameLength) {
+                    peak = max(peak, abs(channels[channel][frame]))
+                }
+            }
+        }
+        guard peak > 0.01, peak < 0.95 else { return }
+
+        let gain = 1.0 / peak
+        let normalizedURL = url.deletingLastPathComponent()
+            .appendingPathComponent("transcribekit-normalized-\(UUID().uuidString).wav")
+        defer { try? FileManager.default.removeItem(at: normalizedURL) }
+        try writeNormalizedWAV(
+            from: url, to: normalizedURL, format: format, capacity: capacity, gain: gain)
+        try FileManager.default.removeItem(at: url)
+        try FileManager.default.moveItem(at: normalizedURL, to: url)
+    }
+
+    private static func writeNormalizedWAV(
+        from sourceURL: URL,
+        to outputURL: URL,
+        format: AVAudioFormat,
+        capacity: AVAudioFrameCount,
+        gain: Float
+    ) throws {
+        let input = try AVAudioFile(forReading: sourceURL)
+        let output = try AVAudioFile(forWriting: outputURL, settings: format.settings)
+        guard let buffer = AVAudioPCMBuffer(pcmFormat: format, frameCapacity: capacity) else {
+            throw AudioPreprocessorError.exportFailed("Could not allocate normalization buffer")
+        }
+        while input.framePosition < input.length {
+            try Task.checkCancellation()
+            try input.read(into: buffer, frameCount: capacity)
+            guard let channels = buffer.floatChannelData else {
+                throw AudioPreprocessorError.exportFailed("Unsupported normalization format")
+            }
+            for channel in 0..<Int(format.channelCount) {
+                for frame in 0..<Int(buffer.frameLength) {
+                    channels[channel][frame] *= gain
+                }
+            }
+            try output.write(from: buffer)
+        }
+    }
+
+    /// Match AVAssetReader's historical clamping behavior, but resolve it before
+    /// choosing a backend so ffmpeg and AVFoundation transcribe the same interval.
+    private static func validatedTimeRange(
+        for url: URL,
+        startTime: Double?,
+        endTime: Double?
+    ) async throws -> TimeRange {
+        let duration = await getAudioDuration(url)
+        guard duration.isFinite, duration > 0 else {
+            throw AudioPreprocessorError.exportFailed("File has zero duration")
+        }
+        guard (startTime ?? 0).isFinite, (endTime ?? duration).isFinite else {
+            throw AudioPreprocessorError.invalidTimeRange
+        }
+
+        let start = min(duration, max(0, startTime ?? 0))
+        let end = min(duration, max(start, endTime ?? duration))
+        guard end > start else { throw AudioPreprocessorError.invalidTimeRange }
+        return TimeRange(start: start, end: end)
     }
 
     // MARK: - ffmpeg extraction
@@ -46,9 +160,8 @@ public enum AudioPreprocessor {
     private static func extractWithFFmpeg(
         from url: URL,
         to outputURL: URL,
-        startTime: Double?,
-        endTime: Double?
-    ) async -> Bool {
+        range: TimeRange
+    ) async throws -> Bool {
         let searchPaths = ["/opt/homebrew/bin/ffmpeg", "/usr/local/bin/ffmpeg", "/usr/bin/ffmpeg"]
         guard let path = searchPaths.first(where: { FileManager.default.fileExists(atPath: $0) }) else {
             return false
@@ -56,15 +169,8 @@ public enum AudioPreprocessor {
 
         let process = Process()
         process.executableURL = URL(fileURLWithPath: path)
-        var arguments = ["-i", url.path]
-        if let startTime, startTime > 0 {
-            arguments += ["-ss", String(startTime)]
-        }
-        if let endTime {
-            let duration = endTime - (startTime ?? 0)
-            guard duration > 0 else { return false }
-            arguments += ["-t", String(duration)]
-        }
+        var arguments = ["-nostdin", "-i", url.path, "-ss", String(range.start),
+                         "-t", String(range.end - range.start)]
         arguments += [
             "-vn",                // discard video
             "-ac", "1",           // mono
@@ -78,15 +184,31 @@ public enum AudioPreprocessor {
         process.standardOutput = FileHandle.nullDevice
         process.standardError = FileHandle.nullDevice
 
-        let ok: Bool = await withCheckedContinuation { continuation in
-            process.terminationHandler = { p in
-                continuation.resume(returning: p.terminationStatus == 0)
-            }
-            do {
-                try process.run()
-            } catch {
-                continuation.resume(returning: false)
-            }
+        let ok: Bool
+        do {
+            ok = try await withTaskCancellationHandler(operation: {
+                try Task.checkCancellation()
+                let succeeded: Bool = try await withCheckedThrowingContinuation { continuation in
+                    process.terminationHandler = { p in
+                        continuation.resume(returning: p.terminationStatus == 0)
+                    }
+                    do {
+                        try process.run()
+                        if Task.isCancelled { process.terminate() }
+                    } catch {
+                        continuation.resume(throwing: error)
+                    }
+                }
+                try Task.checkCancellation()
+                return succeeded
+            }, onCancel: {
+                if process.isRunning { process.terminate() }
+            })
+        } catch is CancellationError {
+            try? FileManager.default.removeItem(at: outputURL)
+            throw CancellationError()
+        } catch {
+            return false
         }
 
         guard ok else {
@@ -109,25 +231,18 @@ public enum AudioPreprocessor {
     private static func extractWithAssetReader(
         from url: URL,
         to outputURL: URL,
-        startTime: Double?,
-        endTime: Double?
+        range: TimeRange
     ) async throws {
-        let asset = AVAsset(url: url)
-        let audioTracks = try await asset.loadTracks(withMediaType: .audio)
-        guard let audioTrack = audioTracks.first else {
-            throw AudioPreprocessorError.noAudioTrack
-        }
+        let cancellation = ReaderCancellation()
+        try await withTaskCancellationHandler(operation: {
+            try Task.checkCancellation()
+            let asset = AVAsset(url: url)
+            let audioTracks = try await asset.loadTracks(withMediaType: .audio)
+            guard let audioTrack = audioTracks.first else {
+                throw AudioPreprocessorError.noAudioTrack
+            }
 
-        let totalDuration = try await CMTimeGetSeconds(asset.load(.duration))
-        guard totalDuration > 0 else {
-            throw AudioPreprocessorError.exportFailed("File has zero duration")
-        }
-        let rangeStart = min(totalDuration, max(0, startTime ?? 0))
-        let rangeEnd = min(totalDuration, max(rangeStart, endTime ?? totalDuration))
-        let rangeDuration = rangeEnd - rangeStart
-        guard rangeDuration > 0 else { throw AudioPreprocessorError.invalidTimeRange }
-
-        let outputSettings: [String: Any] = [
+            let outputSettings: [String: Any] = [
             AVFormatIDKey: kAudioFormatLinearPCM,
             AVLinearPCMBitDepthKey: 32,
             AVLinearPCMIsFloatKey: true,
@@ -136,33 +251,37 @@ public enum AudioPreprocessor {
             AVNumberOfChannelsKey: 1,
         ]
 
-        let wavFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000,
+            let wavFormat = AVAudioFormat(commonFormat: .pcmFormatFloat32, sampleRate: 16000,
                                       channels: 1, interleaved: false)!
-        let wavFile = try AVAudioFile(forWriting: outputURL, settings: wavFormat.settings)
+            let wavFile = try AVAudioFile(forWriting: outputURL, settings: wavFormat.settings)
 
         // Process in time-ranged chunks — a fresh AVAssetReader per chunk avoids
         // internal resource limits that cause silent mid-file failures.
-        let chunkSeconds: Double = 300
-        var offset = rangeStart
-        var totalFrames: UInt64 = 0
+            let chunkSeconds: Double = 300
+            var offset = range.start
+            var totalFrames: UInt64 = 0
 
-        while offset < rangeEnd {
-            let duration = min(chunkSeconds, rangeEnd - offset)
+            while offset < range.end {
+                try Task.checkCancellation()
+                let duration = min(chunkSeconds, range.end - offset)
             let timeRange = CMTimeRange(
                 start: CMTime(seconds: offset, preferredTimescale: 600),
                 duration: CMTime(seconds: duration, preferredTimescale: 600))
 
-            let reader = try AVAssetReader(asset: asset)
-            reader.timeRange = timeRange
-            let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
-            reader.add(output)
-            guard reader.startReading() else {
-                if totalFrames > 0 { break }
-                throw AudioPreprocessorError.exportFailed(reader.error?.localizedDescription)
-            }
+                let reader = try AVAssetReader(asset: asset)
+                cancellation.set(reader)
+                defer { cancellation.clear(reader) }
+                reader.timeRange = timeRange
+                let output = AVAssetReaderTrackOutput(track: audioTrack, outputSettings: outputSettings)
+                reader.add(output)
+                guard reader.startReading() else {
+                    if totalFrames > 0 { break }
+                    throw AudioPreprocessorError.exportFailed(reader.error?.localizedDescription)
+                }
 
-            var chunkFrames: UInt64 = 0
-            while let sampleBuffer = output.copyNextSampleBuffer(),
+                var chunkFrames: UInt64 = 0
+                while !Task.isCancelled,
+                      let sampleBuffer = output.copyNextSampleBuffer(),
                   let blockBuffer = CMSampleBufferGetDataBuffer(sampleBuffer) {
                 var length = 0
                 var dataPointer: UnsafeMutablePointer<Int8>?
@@ -179,25 +298,29 @@ public enum AudioPreprocessor {
                     try wavFile.write(from: pcmBuffer)
                     chunkFrames += UInt64(floatCount)
                 }
+                }
+                try Task.checkCancellation()
+
+                if reader.status == .failed && chunkFrames == 0 {
+                    break
+                }
+
+                totalFrames += chunkFrames
+                offset += duration
             }
 
-            if reader.status == .failed && chunkFrames == 0 {
-                break
+            guard totalFrames > 0 else {
+                throw AudioPreprocessorError.exportFailed("No audio samples could be decoded")
             }
 
-            totalFrames += chunkFrames
-            offset += duration
-        }
-
-        guard totalFrames > 0 else {
-            throw AudioPreprocessorError.exportFailed("No audio samples could be decoded")
-        }
-
-        let actualDuration = Double(totalFrames) / 16000.0
-        if actualDuration / rangeDuration < 0.9 {
-            throw AudioPreprocessorError.exportFailed(
-                "Extracted \(Int(actualDuration))s of \(Int(rangeDuration))s")
-        }
+            let actualDuration = Double(totalFrames) / 16000.0
+            if actualDuration / (range.end - range.start) < 0.9 {
+                throw AudioPreprocessorError.exportFailed(
+                    "Extracted \(Int(actualDuration))s of \(Int(range.end - range.start))s")
+            }
+        }, onCancel: {
+            cancellation.cancel()
+        })
     }
 
     /// Mix to mono (if needed), normalize, and optionally trim to a time range.
@@ -218,14 +341,9 @@ public enum AudioPreprocessor {
         let audioFile: AVAudioFile
         var extractCleanup: (() -> Void)?
         if isVideo {
-            let (extractedURL, cleanup) = try await extractAudio(from: url)
-            extractCleanup = cleanup
-            do {
-                audioFile = try AVAudioFile(forReading: extractedURL)
-            } catch {
-                cleanup()
-                throw error
-            }
+            // extractAudio already streams normalization to 16 kHz mono and applies
+            // the validated trim, so avoid decoding a video once just to decode it again.
+            return try await extractAudio(from: url, startTime: startTime, endTime: endTime)
         } else {
             do {
                 audioFile = try AVAudioFile(forReading: url)
@@ -252,10 +370,10 @@ public enum AudioPreprocessor {
 
         guard needsTrim || needsMono || needsResample else {
             if let extractCleanup {
-                // Extracted file is already the right format — return it with its cleanup
+                // The fallback extraction has already normalized this temporary file.
                 return (URL(fileURLWithPath: audioFile.url.path), cleanup: extractCleanup)
             }
-            return (url, cleanup: {})
+            return try await extractAudio(from: url)
         }
 
         let requestedStart = startTime ?? 0

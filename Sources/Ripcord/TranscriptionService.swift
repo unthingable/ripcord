@@ -37,6 +37,9 @@ private struct PendingSpeakers: Codable {
 final class TranscriptionService: @unchecked Sendable {
     var state: TranscriptionState = .idle
     var transcribingURL: URL?
+    var transcriptionPhase: TranscriptionPhase?
+    var transcriptionProgress: Double?
+    var transcriptionStartedAt: Date?
 
     /// Unmatched speakers from the most recent transcription, keyed by audio file URL.
     var unmatchedSpeakers: [URL: [UnmatchedSpeaker]] = [:]
@@ -63,6 +66,8 @@ final class TranscriptionService: @unchecked Sendable {
 
     private var transcriber = Transcriber()
     private var transcriptionTask: Task<Void, Never>?
+    private let transcriptionOperationLock = NSLock()
+    private var activeTranscriptionID: UUID?
 
     // MARK: - Model Lifecycle
 
@@ -100,40 +105,85 @@ final class TranscriptionService: @unchecked Sendable {
     // MARK: - Transcription Pipeline
 
     func startTranscription(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) {
-        transcriptionTask?.cancel()
-        transcriptionTask = Task {
-            await MainActor.run { lastTranscriptionError = nil }
+        let operationID = UUID()
+        let previousTask = transcriptionOperationLock.withLock { () -> Task<Void, Never>? in
+            let task = transcriptionTask
+            transcriptionTask = nil
+            activeTranscriptionID = operationID
+            return task
+        }
+        previousTask?.cancel()
+
+        let task = Task { [weak self] in
+            guard let self else { return }
+            await previousTask?.value
+            guard !Task.isCancelled else { return }
+            await self.updateCurrentOperation(operationID) {
+                if self.state == .transcribing {
+                    self.state = .ready
+                    self.transcribingURL = nil
+                }
+                self.lastTranscriptionError = nil
+            }
             do {
-                _ = try await self.transcribe(fileURL: fileURL, config: config, overwrite: overwrite)
+                _ = try await self.transcribe(
+                    fileURL: fileURL, config: config, overwrite: overwrite, operationID: operationID)
             } catch is CancellationError {
                 // Cancelled — no error to show
             } catch {
-                await MainActor.run {
-                    lastTranscriptionError = error.localizedDescription
-                    state = .ready
-                    transcribingURL = nil
+                await self.updateCurrentOperation(operationID) {
+                    self.lastTranscriptionError = error.localizedDescription
+                    self.state = .ready
+                    self.transcribingURL = nil
+                    self.transcriptionPhase = nil
+                    self.transcriptionProgress = nil
+                    self.transcriptionStartedAt = nil
                 }
             }
-            self.transcriptionTask = nil
+            self.clearOperationIfCurrent(operationID)
+        }
+        transcriptionOperationLock.withLock {
+            guard activeTranscriptionID == operationID else {
+                task.cancel()
+                return
+            }
+            transcriptionTask = task
         }
     }
 
     @MainActor
     func cancelTranscription() {
-        transcriptionTask?.cancel()
-        transcriptionTask = nil
+        let task = transcriptionOperationLock.withLock { () -> Task<Void, Never>? in
+            let task = transcriptionTask
+            transcriptionTask = nil
+            activeTranscriptionID = nil
+            return task
+        }
+        task?.cancel()
         state = .ready
         transcribingURL = nil
+        transcriptionPhase = nil
+        transcriptionProgress = nil
+        transcriptionStartedAt = nil
     }
 
-    private func transcribe(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) async throws -> URL {
+    private func transcribe(
+        fileURL: URL,
+        config: TranscriptionConfig,
+        overwrite: Bool = false,
+        operationID: UUID
+    ) async throws -> URL {
+        try ensureCurrentOperation(operationID)
         guard modelsReady, transcriber.isReady else {
             throw TranscriptionError.modelsNotReady
         }
 
-        await MainActor.run {
-            state = .transcribing
-            transcribingURL = fileURL
+        await updateCurrentOperation(operationID) {
+            self.state = .transcribing
+            self.transcribingURL = fileURL
+            self.transcriptionPhase = .preparing
+            self.transcriptionProgress = nil
+            self.transcriptionStartedAt = Date()
         }
 
         do {
@@ -161,7 +211,15 @@ final class TranscriptionService: @unchecked Sendable {
             }
 
             let result = try await transcriber.transcribe(
-                fileURL: fileURL, diarization: diarization)
+                fileURL: fileURL, diarization: diarization
+            ) { [weak self] phase, progress in
+                Task { @MainActor in
+                    guard let self, self.isCurrentOperation(operationID) else { return }
+                    self.transcriptionPhase = phase
+                    self.transcriptionProgress = progress
+                }
+            }
+            try ensureCurrentOperation(operationID)
 
             // Speaker matching against stored profiles
             var segments = result.segments
@@ -193,14 +251,16 @@ final class TranscriptionService: @unchecked Sendable {
                     return speaker
                 }.sorted { $0.id < $1.id }
 
-                await MainActor.run {
+                await updateCurrentOperation(operationID) {
                     self.unmatchedSpeakers[fileURL] = allSpeakers
                     self.lastResults[fileURL] = (result, config, speakerMapping, transcriptURL)
                 }
 
-                self.writePendingSpeakers(allSpeakers, for: fileURL,
-                                          format: format, result: result,
-                                          transcriptURL: transcriptURL)
+                try performIfCurrentOperation(operationID) {
+                    self.writePendingSpeakers(allSpeakers, for: fileURL,
+                                              format: format, result: result,
+                                              transcriptURL: transcriptURL)
+                }
             }
 
             let metadata = TranscriptMetadata(
@@ -210,21 +270,59 @@ final class TranscriptionService: @unchecked Sendable {
                 configSummary: Self.configSummary(config))
             let formatted = formatOutput(
                 segments: segments, metadata: metadata, format: format)
-            try formatted.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            try performIfCurrentOperation(operationID) {
+                try formatted.write(to: transcriptURL, atomically: true, encoding: .utf8)
+            }
 
-            await MainActor.run {
-                if transcribingURL == fileURL {
-                    state = .ready; transcribingURL = nil
-                }
+            await updateCurrentOperation(operationID) {
+                self.state = .ready; self.transcribingURL = nil
+                self.transcriptionPhase = nil
+                self.transcriptionProgress = nil
+                self.transcriptionStartedAt = nil
             }
             return transcriptURL
         } catch {
-            await MainActor.run {
-                if transcribingURL == fileURL {
-                    state = .ready; transcribingURL = nil
-                }
+            await updateCurrentOperation(operationID) {
+                self.state = .ready; self.transcribingURL = nil
             }
             throw error
+        }
+    }
+
+    private func isCurrentOperation(_ operationID: UUID) -> Bool {
+        transcriptionOperationLock.withLock { activeTranscriptionID == operationID }
+    }
+
+    private func ensureCurrentOperation(_ operationID: UUID) throws {
+        try Task.checkCancellation()
+        guard isCurrentOperation(operationID) else { throw CancellationError() }
+    }
+
+    private func clearOperationIfCurrent(_ operationID: UUID) {
+        transcriptionOperationLock.withLock {
+            guard activeTranscriptionID == operationID else { return }
+            activeTranscriptionID = nil
+            transcriptionTask = nil
+        }
+    }
+
+    private func performIfCurrentOperation<T>(
+        _ operationID: UUID,
+        _ operation: () throws -> T
+    ) throws -> T {
+        try transcriptionOperationLock.withLock {
+            guard activeTranscriptionID == operationID else { throw CancellationError() }
+            return try operation()
+        }
+    }
+
+    private func updateCurrentOperation(
+        _ operationID: UUID,
+        _ update: @escaping @MainActor () -> Void
+    ) async {
+        await MainActor.run {
+            guard self.isCurrentOperation(operationID) else { return }
+            update()
         }
     }
 

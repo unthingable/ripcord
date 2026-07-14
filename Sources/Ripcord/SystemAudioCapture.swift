@@ -41,6 +41,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     private var resampleOutputBuffer = [Float](repeating: 0, count: 16384)
 
     func start() async throws {
+        lastOutputEndHostTime = nil
         // Get our own PID and translate to AudioObjectID so we can exclude ourselves
         let myPID = ProcessInfo.processInfo.processIdentifier
         let myObjectID = try translatePIDToProcessObject(myPID)
@@ -248,6 +249,7 @@ final class SystemAudioCapture: @unchecked Sendable {
     // MARK: - I/O Block Handler
 
     private var ioBlockCount = 0
+    private var lastOutputEndHostTime: UInt64?
 
     private func handleIOBlock(inputData: UnsafePointer<AudioBufferList>, inputTime: AudioTimeStamp,
                                callback: ((UnsafeBufferPointer<Float>, AudioSampleTiming) -> Void)?) {
@@ -295,19 +297,30 @@ final class SystemAudioCapture: @unchecked Sendable {
             logger.error("IOBlock #\(self.ioBlockCount) frames=\(frameCount) ch=\(channelCount) peak=\(peak) converter=\(self.converter != nil)")
         }
 
-        let timing = AudioSampleTiming.from(inputTime, sampleRate: AudioConstants.sampleRate)
+        let timing = AudioSampleTiming.from(
+            inputTime, sampleRate: AudioConstants.sampleRate,
+            fallbackHostTime: lastOutputEndHostTime)
 
         if converter != nil {
             if let resampledCount = resample(frameCount: frameCount) {
                 resampleOutputBuffer.withUnsafeBufferPointer { ptr in
                     callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount), timing)
                 }
+                updateLastOutputEnd(from: timing, sampleCount: resampledCount)
             }
         } else {
             stereoBuffer.withUnsafeBufferPointer { ptr in
                 callback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize), timing)
             }
+            updateLastOutputEnd(from: timing, sampleCount: stereoSize)
         }
+    }
+
+    private func updateLastOutputEnd(from timing: AudioSampleTiming, sampleCount: Int) {
+        let frames = sampleCount / CircularAudioBuffer.channelsPerFrame
+        let nanos = AudioConvertHostTimeToNanos(timing.hostTime)
+            + UInt64(Double(frames) * 1_000_000_000.0 / AudioConstants.sampleRate)
+        lastOutputEndHostTime = AudioConvertNanosToHostTime(nanos)
     }
 
     // MARK: - Resampling

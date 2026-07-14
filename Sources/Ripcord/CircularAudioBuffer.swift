@@ -10,6 +10,7 @@ final class CircularAudioBuffer: @unchecked Sendable {
     private var buffer: [Float]
     private var writeHead: Int = 0  // sample index (not frame index)
     private var totalWritten: Int = 0  // in frames
+    private var latestEndHostTime: UInt64?
     private let lock = NSLock()
 
     // Inline peak tracking for level meter
@@ -25,7 +26,7 @@ final class CircularAudioBuffer: @unchecked Sendable {
         lock.withLock { min(totalWritten, capacityFrames) }
     }
 
-    func write(_ samples: UnsafeBufferPointer<Float>) {
+    func write(_ samples: UnsafeBufferPointer<Float>, endHostTime: UInt64? = nil) {
         lock.lock()
         defer { lock.unlock() }
 
@@ -38,6 +39,7 @@ final class CircularAudioBuffer: @unchecked Sendable {
             if a > meterPeakAccum { meterPeakAccum = a }
         }
         totalWritten += samples.count / Self.channelsPerFrame
+        if let endHostTime { latestEndHostTime = endHostTime }
     }
 
     /// Returns all buffered audio (stereo-interleaved) in chronological order
@@ -66,6 +68,7 @@ final class CircularAudioBuffer: @unchecked Sendable {
         // Reset
         writeHead = 0
         totalWritten = 0
+        latestEndHostTime = nil
 
         return result
     }
@@ -75,6 +78,16 @@ final class CircularAudioBuffer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
 
+        return readLocked(lastNFrames: count)
+    }
+
+    func readWithEndHostTime(lastNFrames count: Int) -> (samples: [Float], endHostTime: UInt64?) {
+        lock.lock()
+        defer { lock.unlock() }
+        return (readLocked(lastNFrames: count), latestEndHostTime)
+    }
+
+    private func readLocked(lastNFrames count: Int) -> [Float] {
         let availableFrames = min(totalWritten, capacityFrames)
         let n = min(count, availableFrames)
         guard n > 0 else { return [] }
@@ -111,5 +124,6 @@ final class CircularAudioBuffer: @unchecked Sendable {
         writeHead = 0
         totalWritten = 0
         meterPeakAccum = 0
+        latestEndHostTime = nil
     }
 }

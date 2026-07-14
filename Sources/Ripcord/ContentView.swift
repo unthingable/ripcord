@@ -176,7 +176,7 @@ struct ContentView: View {
             MainActor.assumeIsolated {
                 NSApp.activate(ignoringOtherApps: true)
                 guard let settings = NSApp.windows.first(where: {
-                    $0 != panel && $0.canBecomeKey && $0.isVisible
+                    $0 != panel && $0.title == "Settings" && $0.isVisible
                 }) else { return }
                 if let obs = Self.settingsCloseObserver {
                     NotificationCenter.default.removeObserver(obs)
@@ -207,11 +207,15 @@ struct ContentView: View {
     @ViewBuilder
     private var statusSection: some View {
         HStack {
-            Circle()
-                .fill(statusColor)
-                .frame(width: 8, height: 8)
-            Text(statusText)
-                .font(.headline)
+            HStack(spacing: 6) {
+                Circle()
+                    .fill(statusColor)
+                    .frame(width: 8, height: 8)
+                Text(statusText)
+                    .font(.headline)
+            }
+            .accessibilityElement(children: .combine)
+            .accessibilityLabel("Status: \(statusText)")
             Spacer()
             if manager.liveTranscriptEnabled && manager.liveTranscriptStream != nil {
                 Button(action: {
@@ -233,8 +237,6 @@ struct ContentView: View {
             .foregroundStyle(.secondary)
             .accessibilityLabel("Settings")
         }
-        .accessibilityElement(children: .combine)
-        .accessibilityLabel("Status: \(statusText)")
     }
 
     private var statusColor: Color {
@@ -761,6 +763,7 @@ struct ContentView: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
+                .accessibilityLabel("Microphone capture")
             }
             .help("Microphone capture")
 
@@ -788,6 +791,7 @@ struct ContentView: View {
                 .toggleStyle(.switch)
                 .controlSize(.mini)
                 .labelsHidden()
+                .accessibilityLabel("Mix microphone and system audio")
             }
             .help("Stereo: mixed together\nSplit: system in left, mic in right")
 
@@ -810,6 +814,7 @@ struct ContentView: View {
                 .controlSize(.mini)
                 .labelsHidden()
                 .disabled(!manager.transcriptionService.modelsLoaded)
+                .accessibilityLabel("Live Transcript")
             }
             .help("Live Transcript")
         }
@@ -1085,7 +1090,10 @@ private struct RecordingRowView: View {
                     .help("Rename")
 
                     if manager.transcriptionService.transcribingURL == recording.url {
-                        CancelableSpinner {
+                        TranscriptionProgressIndicator(
+                            phase: manager.transcriptionService.transcriptionPhase,
+                            progress: manager.transcriptionService.transcriptionProgress
+                        ) {
                             manager.transcriptionService.cancelTranscription()
                         }
                     } else if manager.transcriptionService.modelsLoaded {
@@ -1149,19 +1157,27 @@ private struct RecordingRowView: View {
     }
 }
 
-// MARK: - Cancelable Spinner
+// MARK: - Transcription Progress
 
-/// A progress spinner that becomes a cancel button on hover.
-private struct CancelableSpinner: View {
+private struct TranscriptionProgressIndicator: View {
+    let phase: TranscriptionPhase?
+    let progress: Double?
     var onCancel: () -> Void
     @State private var isHovered = false
 
     var body: some View {
         Button(action: onCancel) {
             ZStack {
-                ProgressView()
-                    .controlSize(.small)
-                    .opacity(isHovered ? 0 : 1)
+                if let progress {
+                    ProgressView(value: progress)
+                        .progressViewStyle(.circular)
+                        .controlSize(.small)
+                        .opacity(isHovered ? 0 : 1)
+                } else {
+                    ProgressView()
+                        .controlSize(.small)
+                        .opacity(isHovered ? 0 : 1)
+                }
                 Image(systemName: "stop.fill")
                     .font(.body)
                     .foregroundStyle(.secondary)
@@ -1169,8 +1185,29 @@ private struct CancelableSpinner: View {
             }
         }
         .buttonStyle(.plain)
-        .help("Cancel transcription")
+        .help(helpText)
+        .accessibilityLabel("Cancel transcription")
+        .accessibilityValue(accessibilityValue)
         .onHover { isHovered = $0 }
+    }
+
+    private var helpText: String {
+        let stage: String
+        switch phase {
+        case .preparing: stage = "Preparing audio"
+        case .transcribing: stage = "Transcribing"
+        case .diarizing: stage = "Identifying speakers"
+        case .finalizing: stage = "Finalizing transcript"
+        case nil: stage = "Transcribing"
+        }
+        if let progress {
+            return "\(stage) \(Int((progress * 100).rounded()))% - click to cancel"
+        }
+        return "\(stage) - click to cancel"
+    }
+
+    private var accessibilityValue: String {
+        return helpText.replacingOccurrences(of: " - click to cancel", with: "")
     }
 }
 

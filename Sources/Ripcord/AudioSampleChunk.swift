@@ -8,12 +8,13 @@ struct AudioSampleTiming: Sendable {
     let channelsPerFrame: Int
 
     static func from(_ timestamp: AudioTimeStamp?, sampleRate: Double,
-                     channelsPerFrame: Int = CircularAudioBuffer.channelsPerFrame) -> AudioSampleTiming {
+                     channelsPerFrame: Int = CircularAudioBuffer.channelsPerFrame,
+                     fallbackHostTime: UInt64? = nil) -> AudioSampleTiming {
         let hostTime: UInt64
         if let timestamp, timestamp.mFlags.contains(.hostTimeValid), timestamp.mHostTime > 0 {
             hostTime = timestamp.mHostTime
         } else {
-            hostTime = AudioGetCurrentHostTime()
+            hostTime = fallbackHostTime ?? AudioGetCurrentHostTime()
         }
 
         let sampleTime = timestamp?.mFlags.contains(.sampleTimeValid) == true

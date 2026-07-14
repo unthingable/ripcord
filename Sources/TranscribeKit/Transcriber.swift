@@ -3,6 +3,13 @@ import FluidAudio
 import Foundation
 import os
 
+public enum TranscriptionPhase: String, Sendable {
+    case preparing
+    case transcribing
+    case diarizing
+    case finalizing
+}
+
 public final class Transcriber: @unchecked Sendable {
     private let lock = NSLock()
     private var asrManager: AsrManager?
@@ -79,13 +86,14 @@ public final class Transcriber: @unchecked Sendable {
         fileURL: URL,
         diarization: DiarizationConfig? = DiarizationConfig(),
         startTime: Double? = nil,
-        endTime: Double? = nil
+        endTime: Double? = nil,
+        progress: @escaping @Sendable (TranscriptionPhase, Double?) -> Void = { _, _ in }
     ) async throws -> TranscriptionResult {
         guard let asr = lock.withLock({ asrManager }) else {
             throw TranscriberError.modelsNotReady
         }
 
-        // Pre-process audio (mono mix, normalization, optional trim)
+        progress(.preparing, nil)
         let (processURL, cleanup) = try await AudioPreprocessor.prepareAudio(
             from: fileURL, startTime: startTime, endTime: endTime)
         defer { cleanup() }
@@ -93,8 +101,22 @@ public final class Transcriber: @unchecked Sendable {
         let audioDuration = await AudioPreprocessor.getAudioDuration(processURL)
         try Task.checkCancellation()
 
-        // ASR
+        progress(.transcribing, 0)
+        let progressStream = await asr.transcriptionProgressStream
+        let progressTask = Task {
+            do {
+                for try await fraction in progressStream {
+                    progress(.transcribing, fraction)
+                }
+            } catch is CancellationError {
+                // Parent transcription cancellation handles the visible state.
+            } catch {
+                // The transcription call reports the underlying ASR failure.
+            }
+        }
+        defer { progressTask.cancel() }
         let asrResult = try await asr.transcribe(processURL)
+        progress(.transcribing, 1)
         let duration = asrResult.duration > 0 ? asrResult.duration : audioDuration
 
         try Task.checkCancellation()
@@ -102,6 +124,7 @@ public final class Transcriber: @unchecked Sendable {
         // Diarization
         var diarizationResult: DiarizationResult?
         if let config = diarization {
+            progress(.diarizing, nil)
             switch config.engine {
             case .offline:
                 diarizationResult = try await diarizeOffline(fileURL: processURL, config: config)
@@ -122,7 +145,7 @@ public final class Transcriber: @unchecked Sendable {
 
         try Task.checkCancellation()
 
-        // Merge
+        progress(.finalizing, nil)
         let removeFillers = diarization?.removeFillerWords ?? false
         var segments = mergeResults(
             asrResult: asrResult,

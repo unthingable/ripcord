@@ -209,6 +209,7 @@ final class RecordingManager: @unchecked Sendable {
 
     private var timelineAligner = AudioTimelineAligner(oneSidedFlushFrames: 24_000)
     private var effectiveMicAdvanceFrames = 0
+    private var lastObservedDefaultInputID: AudioDeviceID?
 
     // Channel split snapshot — only accessed on writeQueue
     private var splitEnabled: Bool = true
@@ -380,6 +381,7 @@ final class RecordingManager: @unchecked Sendable {
         deviceEnumerator.onDevicesChanged = { [weak self] devices in
             self?.handleInputDevicesChanged(devices)
         }
+        lastObservedDefaultInputID = deviceEnumerator.defaultInputDeviceID
         handleInputDevicesChanged(deviceEnumerator.inputDevices)
         refreshCurrentMicLatencyEstimate()
         installSignalHandlers()
@@ -642,8 +644,10 @@ final class RecordingManager: @unchecked Sendable {
 
         // Read back-record audio from circular buffers (read without drain — waveform stays continuous)
         let captureFrames = captureDurationSeconds * AudioConstants.sampleRateInt
-        let systemSamples = systemBuffer.read(lastNFrames: captureFrames)
+        let systemSnapshot = systemBuffer.readWithEndHostTime(lastNFrames: captureFrames)
+        let systemSamples = systemSnapshot.samples
         let micSamples = micBuffer.read(lastNFrames: captureFrames)
+        let bufferBoundaryHostTime = systemSnapshot.endHostTime ?? AudioGetCurrentHostTime()
 
         // Mark back-record bars as recorded and set state for new bars
         let barsInCapture = min(100, captureDurationSeconds * 100 / max(1, bufferDurationSeconds))
@@ -677,11 +681,18 @@ final class RecordingManager: @unchecked Sendable {
             self.silenceSampleCount = 0
             self.silenceDetected = false
 
-            // Write the back-record buffer
-            let stereoBuffered = self.packStereo(
-                systemSamples,
-                Self.shiftStereo(micSamples, byAdvancingFrames: micAdvanceFrames)
+            let boundary = Self.prepareBufferedBoundary(
+                system: systemSamples,
+                mic: micSamples,
+                micAdvanceFrames: micAdvanceFrames,
+                boundaryHostTime: bufferBoundaryHostTime
             )
+            self.timelineAligner.prime(
+                system: boundary.systemSeed,
+                mic: [],
+                micAdvanceFrames: micAdvanceFrames
+            )
+            let stereoBuffered = self.packStereo(boundary.system, boundary.mic)
             if !stereoBuffered.isEmpty {
                 do {
                     try newWriter.append(samples: stereoBuffered)
@@ -1079,15 +1090,23 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     private func handleInputDevicesChanged(_ devices: [AudioInputDevice]) {
+        let currentDefaultID = deviceEnumerator.defaultInputDeviceID
+        let defaultChanged = currentDefaultID != lastObservedDefaultInputID
+        lastObservedDefaultInputID = currentDefaultID
+
         if let pendingMicRestoreUID,
            devices.contains(where: { $0.uid == pendingMicRestoreUID }) {
             selectedMicUID = pendingMicRestoreUID
             self.pendingMicRestoreUID = nil
             UserDefaults.standard.set(pendingMicRestoreUID, forKey: SettingsKey.selectedMicUID)
             UserDefaults.standard.removeObject(forKey: SettingsKey.pendingMicRestoreUID)
-            Task { await restartMicIfRunning() }
+            Task { await restartMicIfDesired() }
             refreshCurrentMicLatencyEstimate()
             return
+        }
+
+        if selectedMicUID == nil, defaultChanged, micEnabled {
+            Task { await restartMicIfDesired() }
         }
 
         guard let selectedMicUID,
@@ -1099,13 +1118,13 @@ final class RecordingManager: @unchecked Sendable {
         self.selectedMicUID = nil
         UserDefaults.standard.removeObject(forKey: SettingsKey.selectedMicUID)
         UserDefaults.standard.set(selectedMicUID, forKey: SettingsKey.pendingMicRestoreUID)
-        Task { await restartMicIfRunning() }
+        Task { await restartMicIfDesired() }
         refreshCurrentMicLatencyEstimate()
     }
 
-    private func restartMicIfRunning() async {
-        guard micCapture.isRunning else { return }
-        micCapture.stop()
+    private func restartMicIfDesired() async {
+        guard micEnabled else { return }
+        if micCapture.isRunning { micCapture.stop() }
         await startMic()
     }
 
@@ -1156,9 +1175,10 @@ final class RecordingManager: @unchecked Sendable {
 
     /// Live-update gain without restarting capture if it's the active device.
     func updateMicGainDB(_ dB: Double, forUID uid: String) {
-        micGainStore.setGainDB(dB, forUID: uid)
+        let clamped = max(-60, min(80, dB))
+        micGainStore.setGainDB(clamped, forUID: uid)
         if currentSelectedMicDevice()?.uid == uid {
-            micCapture.setInputGain(dB: dB)
+            micCapture.setInputGain(dB: clamped)
         }
     }
 
@@ -1462,6 +1482,39 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
+    private static func prepareBufferedBoundary(
+        system: [Float], mic: [Float], micAdvanceFrames: Int, boundaryHostTime: UInt64
+    ) -> (system: [Float], mic: [Float], systemSeed: [AudioSampleChunk]) {
+        let channels = CircularAudioBuffer.channelsPerFrame
+        guard micAdvanceFrames > 0 else {
+            return (system, shiftStereo(mic, byAdvancingFrames: micAdvanceFrames), [])
+        }
+
+        let systemFrames = system.count / channels
+        let micFrames = mic.count / channels
+        let advance = min(micAdvanceFrames, systemFrames, micFrames)
+        guard advance > 0 else { return (system, mic, []) }
+
+        let advanceSamples = advance * channels
+        let systemPrefix = Array(system.dropLast(advanceSamples))
+        let advancedMic = Array(mic.dropFirst(advanceSamples))
+        let systemTail = Array(system.suffix(advanceSamples))
+        let boundaryNanos = AudioConvertHostTimeToNanos(boundaryHostTime)
+        let advanceNanos = UInt64(Double(advance) * 1_000_000_000.0 / AudioConstants.sampleRate)
+        let timing = AudioSampleTiming(
+            hostTime: AudioConvertNanosToHostTime(boundaryNanos > advanceNanos
+                ? boundaryNanos - advanceNanos : 0),
+            sampleTime: nil,
+            sampleRate: AudioConstants.sampleRate,
+            channelsPerFrame: channels
+        )
+        return (
+            systemPrefix,
+            advancedMic,
+            [AudioSampleChunk(samples: systemTail, timing: timing)]
+        )
+    }
+
     /// Mixed mode: preserve stereo per source, sum L+L and R+R per frame.
     static func mixStereo(_ system: [Float], _ mic: [Float]) -> [Float] {
         let sysFrames = system.count / ch
@@ -1734,7 +1787,12 @@ final class RecordingManager: @unchecked Sendable {
         waveformTracker.feedPeak(peak)
 
         for chunk in chunks {
-            chunk.samples.withUnsafeBufferPointer { buffer.write($0) }
+            let nanos = UInt64(max(0, Double(chunk.endFrame) * 1_000_000_000.0
+                / AudioConstants.sampleRate))
+            let endHostTime = AudioConvertNanosToHostTime(nanos)
+            chunk.samples.withUnsafeBufferPointer {
+                buffer.write($0, endHostTime: endHostTime)
+            }
         }
 
         pendingLock.lock()

@@ -37,6 +37,7 @@ let package = Package(
                 .product(name: "FluidAudio", package: "FluidAudio"),
             ],
             path: "Sources/Ripcord",
+            exclude: ["docs"],
             linkerSettings: [
                 .linkedFramework("CoreAudio"),
                 .linkedFramework("AVFoundation"),
@@ -59,6 +60,11 @@ let package = Package(
             name: "TranscribeKitTests",
             dependencies: ["TranscribeKit"],
             path: "Tests/TranscribeKitTests"
+        ),
+        .testTarget(
+            name: "RegressionTests",
+            dependencies: ["TranscribeKit", "Ripcord"],
+            path: "Tests/RegressionTests"
         ),
     ]
 )

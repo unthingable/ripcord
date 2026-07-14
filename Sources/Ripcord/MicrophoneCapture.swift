@@ -53,6 +53,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     // CoreAudio property changes synchronously notify coreaudiod, which can block for 1-2s.
     // Running on main would stall the UI and block other apps' audio negotiation.
     private let audioQueue = DispatchQueue(label: "com.vibe.ripcord.micCapture")
+    private let audioQueueKey = DispatchSpecificKey<UInt8>()
     private var _isRunning = false
     private var currentDeviceID: AudioDeviceID?
     private var restartWorkItem: DispatchWorkItem?
@@ -92,6 +93,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     private var hasPreviousResampleFrame = false
     private var previousResampleL: Float = 0
     private var previousResampleR: Float = 0
+    private var lastOutputEndHostTime: UInt64?
 
     // Captured at start() so the IO callback avoids a data race on onSamples.
     // Emitted samples are always stereo-interleaved at 48 kHz.
@@ -114,6 +116,10 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     var isRunning: Bool {
         stateLock.withLock { _isRunning }
+    }
+
+    init() {
+        audioQueue.setSpecific(key: audioQueueKey, value: 1)
     }
 
     deinit {
@@ -186,21 +192,23 @@ final class MicrophoneCapture: @unchecked Sendable {
         channelMode: MicChannelMode = .monoDevice,
         gainDB: Double = 0
     ) throws {
-        let alreadyRunning = stateLock.withLock {
-            guard !_isRunning else { return true }
-            _isRunning = true
-            currentDeviceID = deviceID
-            self.channelMode = channelMode
-            self.inputGainLinear = MicGainStore.linearMultiplier(forDB: gainDB)
-            return false
-        }
-        guard !alreadyRunning else { return }
+        try syncOnAudioQueue {
+            let alreadyRunning = stateLock.withLock {
+                guard !_isRunning else { return true }
+                _isRunning = true
+                currentDeviceID = deviceID
+                self.channelMode = channelMode
+                self.inputGainLinear = MicGainStore.linearMultiplier(forDB: gainDB)
+                return false
+            }
+            guard !alreadyRunning else { return }
 
-        do {
-            try startCapture()
-        } catch {
-            stateLock.withLock { _isRunning = false }
-            throw error
+            do {
+                try startCapture()
+            } catch {
+                stateLock.withLock { _isRunning = false }
+                throw error
+            }
         }
     }
 
@@ -208,6 +216,7 @@ final class MicrophoneCapture: @unchecked Sendable {
     /// Caller is responsible for setting _isRunning and currentDeviceID
     /// before calling this.
     private func startCapture() throws {
+        lastOutputEndHostTime = nil
         let deviceID = stateLock.withLock { currentDeviceID }
 
         let effectiveDeviceID: AudioDeviceID
@@ -225,23 +234,19 @@ final class MicrophoneCapture: @unchecked Sendable {
     }
 
     func stop() {
-        let wasRunning = stateLock.withLock {
-            restartWorkItem?.cancel()
-            restartWorkItem = nil
-            guard _isRunning else { return false }
-            _isRunning = false
-            restartSuppressed = false
-            return true
+        syncOnAudioQueue {
+            let wasRunning = stateLock.withLock {
+                restartWorkItem?.cancel()
+                restartWorkItem = nil
+                guard _isRunning else { return false }
+                _isRunning = false
+                restartSuppressed = false
+                return true
+            }
+            guard wasRunning else { return }
+            removeDeviceListeners()
+            tearDownIOProc()
         }
-        guard wasRunning else { return }
-
-        // Fence: wait for any in-flight performDebouncedRestart on
-        // audioQueue to complete. It will observe _isRunning=false via
-        // its re-checks and bail, or finish setup so we can tear it down.
-        audioQueue.sync {}
-
-        removeDeviceListeners()
-        tearDownIOProc()
     }
 
     /// Suppress independent restarts. Called when SystemAudioCapture detects
@@ -627,7 +632,8 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
         }
 
-        let timing = AudioSampleTiming.from(inputTime, sampleRate: deviceSampleRate)
+        let timing = AudioSampleTiming.from(
+            inputTime, sampleRate: deviceSampleRate, fallbackHostTime: lastOutputEndHostTime)
         processNativeInput(frameCount: frameCount, nativeChannels: nativeChannels, source: "IOProc", timing: timing)
     }
 
@@ -675,7 +681,8 @@ final class MicrophoneCapture: @unchecked Sendable {
             }
         }
 
-        let timing = AudioSampleTiming.from(timeStamp.pointee, sampleRate: deviceSampleRate)
+        let timing = AudioSampleTiming.from(
+            timeStamp.pointee, sampleRate: deviceSampleRate, fallbackHostTime: lastOutputEndHostTime)
         processNativeInput(frameCount: frames, nativeChannels: nativeChannels, source: "AUHAL", timing: timing)
         return noErr
     }
@@ -731,6 +738,7 @@ final class MicrophoneCapture: @unchecked Sendable {
                 resampleOutputBuffer.withUnsafeBufferPointer { ptr in
                     capturedCallback?(UnsafeBufferPointer(start: ptr.baseAddress, count: resampledCount), outTiming)
                 }
+                updateLastOutputEnd(from: outTiming, sampleCount: resampledCount)
             }
         } else {
             let outTiming = AudioSampleTiming(
@@ -742,7 +750,15 @@ final class MicrophoneCapture: @unchecked Sendable {
             extractedBuffer.withUnsafeBufferPointer { ptr in
                 capturedCallback?(UnsafeBufferPointer(start: ptr.baseAddress, count: stereoSize), outTiming)
             }
+            updateLastOutputEnd(from: outTiming, sampleCount: stereoSize)
         }
+    }
+
+    private func updateLastOutputEnd(from timing: AudioSampleTiming, sampleCount: Int) {
+        let frames = sampleCount / CircularAudioBuffer.channelsPerFrame
+        let nanos = AudioConvertHostTimeToNanos(timing.hostTime)
+            + UInt64(Double(frames) * 1_000_000_000.0 / AudioConstants.sampleRate)
+        lastOutputEndHostTime = AudioConvertNanosToHostTime(nanos)
     }
 
     /// Project the device-native interleaved frames in `renderBuffer` onto the
@@ -1063,6 +1079,13 @@ final class MicrophoneCapture: @unchecked Sendable {
 
     private func osCheck(_ status: OSStatus) throws {
         guard status == noErr else { throw DeviceError.osFailed(status) }
+    }
+
+    private func syncOnAudioQueue<T>(_ body: () throws -> T) rethrows -> T {
+        if DispatchQueue.getSpecific(key: audioQueueKey) != nil {
+            return try body()
+        }
+        return try audioQueue.sync(execute: body)
     }
 
     /// Read the device's input stream's native format (rate + channel count).
