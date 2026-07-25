@@ -68,6 +68,7 @@ final class TranscriptionService: @unchecked Sendable {
     private var transcriptionTask: Task<Void, Never>?
     private let transcriptionOperationLock = NSLock()
     private var activeTranscriptionID: UUID?
+    private var requestedTranscriptionURL: URL?
 
     // MARK: - Model Lifecycle
 
@@ -110,6 +111,7 @@ final class TranscriptionService: @unchecked Sendable {
             let task = transcriptionTask
             transcriptionTask = nil
             activeTranscriptionID = operationID
+            requestedTranscriptionURL = fileURL
             return task
         }
         previousTask?.cancel()
@@ -157,6 +159,7 @@ final class TranscriptionService: @unchecked Sendable {
             let task = transcriptionTask
             transcriptionTask = nil
             activeTranscriptionID = nil
+            requestedTranscriptionURL = nil
             return task
         }
         task?.cancel()
@@ -165,6 +168,30 @@ final class TranscriptionService: @unchecked Sendable {
         transcriptionPhase = nil
         transcriptionProgress = nil
         transcriptionStartedAt = nil
+    }
+
+    /// Used by audio replacement: cancellation is not enough because a
+    /// transcriber may still be reading the old file for a short time.
+    func cancelTranscriptionAndWait(for fileURL: URL) async {
+        let task = transcriptionOperationLock.withLock { () -> Task<Void, Never>? in
+            guard requestedTranscriptionURL == fileURL || transcribingURL == fileURL else { return nil }
+            let task = transcriptionTask
+            transcriptionTask = nil
+            activeTranscriptionID = nil
+            requestedTranscriptionURL = nil
+            return task
+        }
+        task?.cancel()
+        await task?.value
+        await MainActor.run {
+            if self.transcribingURL == fileURL {
+                self.state = .ready
+                self.transcribingURL = nil
+                self.transcriptionPhase = nil
+                self.transcriptionProgress = nil
+                self.transcriptionStartedAt = nil
+            }
+        }
     }
 
     private func transcribe(
@@ -303,6 +330,7 @@ final class TranscriptionService: @unchecked Sendable {
             guard activeTranscriptionID == operationID else { return }
             activeTranscriptionID = nil
             transcriptionTask = nil
+            requestedTranscriptionURL = nil
         }
     }
 

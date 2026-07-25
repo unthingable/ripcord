@@ -134,6 +134,26 @@ final class RecordingManager: @unchecked Sendable {
     var waveformAmplitudes: [Float] = Array(repeating: 0, count: 100)
     var waveformBarStates: [BarState] = Array(repeating: .idle, count: 100)
     var filledBarCount: Int = 1
+    /// Absolute visible capture window, used by the waveform handles. Values
+    /// are snapshots, never array offsets, so a rolling buffer cannot make a
+    /// drag select the wrong audio.
+    var visibleCaptureRange = CaptureFrameRange(0, 0)
+    var pausedSelectionRange: CaptureFrameRange?
+    var recordingSelectedRanges: [CaptureFrameRange] = []
+    var isEditingLatestRecording = false
+    var latestRecordingEditRange: CaptureFrameRange?
+    var latestRecordingEditVisibleRange: CaptureFrameRange?
+    var latestRecordingEditWaveformAmplitudes: [Float]?
+    var latestRecordingEditWaveformStates: [BarState]?
+    var latestRecordingEditFilledBarCount: Int?
+    var hasEditableLatestRecording: Bool { latestFinalizedDescriptor != nil }
+    var latestRecordingBoundaryRange: CaptureFrameRange? {
+        guard let descriptor = latestFinalizedDescriptor,
+              let start = descriptor.sourceStart,
+              let end = descriptor.sourceEnd else { return nil }
+        return CaptureFrameRange(start, end)
+    }
+    var isApplyingLatestRecordingEdit = false
     var systemLevel: Float = 0
     var micLevel: Float = 0
     var selectedMicUID: String?
@@ -207,7 +227,6 @@ final class RecordingManager: @unchecked Sendable {
     private var writeError: Error?         // Only accessed on writeQueue
     private var writeTimer: DispatchSourceTimer?  // Only accessed on writeQueue
 
-    private var timelineAligner = AudioTimelineAligner(oneSidedFlushFrames: 24_000)
     private var effectiveMicAdvanceFrames = 0
     private var lastObservedDefaultInputID: AudioDeviceID?
 
@@ -224,6 +243,21 @@ final class RecordingManager: @unchecked Sendable {
     // Pause tracking
     private var pausedDuration: TimeInterval = 0
     private var pauseStartTime: Date?
+    private var selectionTimeline = RecordingSelectionTimeline()
+    private var emittedThroughSourceFrame: CaptureFrame?
+    private var displayedVisibleStart: CaptureFrame = 0
+    private var waveformDisplayActive = false
+    private let selectionTimelineLock = NSLock()
+    private var recordingSplitSnapshot = true
+    private var recordingFormatSnapshot: AudioOutputFormat = .wav
+    private var recordingQualitySnapshot: AudioQuality = .medium
+    private var recordingMicAdvanceSnapshot = 0
+    private var latestFinalizedDescriptor: FinalizedRecordingDescriptor?
+    private var editableDescriptor: FinalizedRecordingDescriptor?
+    private var frozenFinalizedSystem: AudioBufferSnapshot?
+    private var frozenFinalizedMic: AudioBufferSnapshot?
+    private var editableFingerprint: FinalizedRecordingDescriptor.Fingerprint?
+    private static let storageMarginSeconds = 2
 
     /// Max samples one source can accumulate without the other before we assume the other is off.
     /// 500ms at 48kHz = 24000 samples.
@@ -268,8 +302,14 @@ final class RecordingManager: @unchecked Sendable {
         let duration = savedDuration > 0 ? savedDuration : 300
 
         // Init buffers first (required before accessing self properties with @Observable)
-        systemBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
-        micBuffer = CircularAudioBuffer(durationSeconds: duration, sampleRate: AudioConstants.sampleRateInt)
+        systemBuffer = CircularAudioBuffer(
+            durationSeconds: duration + Self.storageMarginSeconds,
+            sampleRate: AudioConstants.sampleRateInt
+        )
+        micBuffer = CircularAudioBuffer(
+            durationSeconds: duration + Self.storageMarginSeconds,
+            sampleRate: AudioConstants.sampleRateInt
+        )
         waveformTracker = WaveformTracker(durationSeconds: duration)
 
         transcriptState = MainActor.assumeIsolated { TranscriptState() }
@@ -585,8 +625,52 @@ final class RecordingManager: @unchecked Sendable {
         return s.isFinite ? s : nil
     }
 
+    private static func fingerprint(for url: URL) -> FinalizedRecordingDescriptor.Fingerprint? {
+        guard let values = try? url.resourceValues(forKeys: [
+            .fileSizeKey,
+            .contentModificationDateKey,
+        ]), let size = values.fileSize,
+           let modificationDate = values.contentModificationDate else { return nil }
+        return FinalizedRecordingDescriptor.Fingerprint(
+            size: UInt64(size),
+            modificationDate: modificationDate
+        )
+    }
+
+    private static func synchronizeFile(at url: URL) {
+        let descriptor = open(url.path, O_RDONLY)
+        guard descriptor >= 0 else { return }
+        _ = fsync(descriptor)
+        close(descriptor)
+    }
+
+    private static func synchronizeDirectory(containing url: URL) {
+        let descriptor = open(url.deletingLastPathComponent().path, O_RDONLY)
+        guard descriptor >= 0 else { return }
+        _ = fsync(descriptor)
+        close(descriptor)
+    }
+
+    func transcriptURLs(for audioURL: URL) -> [URL] {
+        let directory = audioURL.deletingLastPathComponent()
+        let stem = audioURL.deletingPathExtension().lastPathComponent
+        guard let files = try? FileManager.default.contentsOfDirectory(
+            at: directory,
+            includingPropertiesForKeys: [.contentModificationDateKey],
+            options: [.skipsHiddenFiles]
+        ) else { return [] }
+        let extensions = Set(OutputFormat.allCases.map(\.rawValue))
+        return files.filter { url in
+            guard extensions.contains(url.pathExtension.lowercased()) else { return false }
+            let candidate = url.deletingPathExtension().lastPathComponent
+            guard candidate == stem || candidate.hasPrefix(stem + "-") else { return false }
+            if candidate == stem { return true }
+            return Int(candidate.dropFirst(stem.count + 1)) != nil
+        }
+    }
+
     func startRecording() {
-        guard state == .buffering else { return }
+        guard state == .buffering, !isEditingLatestRecording else { return }
         logger.error("Recording started")
         refreshSystemMicMode()
         if systemMicMode.isVoiceIsolation {
@@ -642,12 +726,24 @@ final class RecordingManager: @unchecked Sendable {
             }
         }
 
-        // Read back-record audio from circular buffers (read without drain — waveform stays continuous)
+        // Select buffered audio on the canonical capture timeline. It remains
+        // unwritten while it is visible, which is what makes later Out edits
+        // reversible without truncating WAV/M4A files.
         let captureFrames = captureDurationSeconds * AudioConstants.sampleRateInt
-        let systemSnapshot = systemBuffer.readWithEndHostTime(lastNFrames: captureFrames)
-        let systemSamples = systemSnapshot.samples
-        let micSamples = micBuffer.read(lastNFrames: captureFrames)
-        let bufferBoundaryHostTime = systemSnapshot.endHostTime ?? AudioGetCurrentHostTime()
+        let visible = currentVisibleCaptureRange()
+        let initialStart = max(visible.start, visible.end - CaptureFrame(captureFrames))
+        selectionTimelineLock.withLock {
+            selectionTimeline.start(with: CaptureFrameRange(initialStart, visible.end))
+            emittedThroughSourceFrame = visible.isEmpty ? nil : initialStart
+            displayedVisibleStart = visible.start
+        }
+        recordingSelectedRanges = visible.isEmpty
+            ? []
+            : [CaptureFrameRange(initialStart, visible.end)]
+        latestFinalizedDescriptor = nil
+        recordingSplitSnapshot = channelSplit
+        recordingFormatSnapshot = outputFormat
+        recordingQualitySnapshot = audioQuality
 
         // Mark back-record bars as recorded and set state for new bars
         let barsInCapture = min(100, captureDurationSeconds * 100 / max(1, bufferDurationSeconds))
@@ -667,12 +763,12 @@ final class RecordingManager: @unchecked Sendable {
         let silenceThresh = silenceThreshold
         let silenceTimeout = silenceTimeoutSeconds
         let micAdvanceFrames = currentEffectiveMicLatencyFrames()
+        recordingMicAdvanceSnapshot = micAdvanceFrames
 
         writeQueue.async { [weak self] in
             guard let self else { return }
             self.writer = newWriter
             self.writeError = nil
-            self.timelineAligner.reset()
             self.effectiveMicAdvanceFrames = micAdvanceFrames
             self.splitEnabled = split
             self.silenceEnabled = silenceOn
@@ -680,26 +776,6 @@ final class RecordingManager: @unchecked Sendable {
             self.silenceSampleThreshold = Int(silenceTimeout * Double(AudioConstants.sampleRateInt))
             self.silenceSampleCount = 0
             self.silenceDetected = false
-
-            let boundary = Self.prepareBufferedBoundary(
-                system: systemSamples,
-                mic: micSamples,
-                micAdvanceFrames: micAdvanceFrames,
-                boundaryHostTime: bufferBoundaryHostTime
-            )
-            self.timelineAligner.prime(
-                system: boundary.systemSeed,
-                mic: [],
-                micAdvanceFrames: micAdvanceFrames
-            )
-            let stereoBuffered = self.packStereo(boundary.system, boundary.mic)
-            if !stereoBuffered.isEmpty {
-                do {
-                    try newWriter.append(samples: stereoBuffered)
-                } catch {
-                    self.writeError = error
-                }
-            }
 
             // Start write timer (fires every 50ms on writeQueue)
             let timer = DispatchSource.makeTimerSource(queue: self.writeQueue)
@@ -732,6 +808,11 @@ final class RecordingManager: @unchecked Sendable {
     func stopRecording() {
         guard state == .recording || state == .paused else { return }
         logger.error("Recording stopping")
+        let stopFrame = currentVisibleCaptureRange().end
+        let finalizedSpans = selectionTimelineLock.withLock { () -> [SourceOutputSpan] in
+            selectionTimeline.stop(at: stopFrame)
+            return selectionTimeline.outputSpans(at: stopFrame)
+        }
 
         if autoLiveTranscriptStartedForRecording && liveTranscriptEnabled {
             Task { await setLiveTranscriptEnabled(false) }
@@ -752,6 +833,8 @@ final class RecordingManager: @unchecked Sendable {
         recordingStartTime = nil
         recordingElapsed = 0
         isSilencePaused = false
+        pausedSelectionRange = nil
+        recordingSelectedRanges = []
 
         // Dim recorded/paused bars to prior variants, set new bars to idle
         waveformTracker.dimAllBars()
@@ -760,8 +843,6 @@ final class RecordingManager: @unchecked Sendable {
         // Disable pending accumulation and grab remaining samples
         pendingLock.lock()
         pendingActive = false
-        let remainingSystem = pendingSystemChunks
-        let remainingMic = pendingMicChunks
         pendingSystemChunks.removeAll()
         pendingMicChunks.removeAll()
         pendingLock.unlock()
@@ -777,20 +858,7 @@ final class RecordingManager: @unchecked Sendable {
             self.writeTimer?.cancel()
             self.writeTimer = nil
 
-            let stereo = self.timelineAligner.append(
-                system: remainingSystem,
-                mic: remainingMic,
-                micAdvanceFrames: self.effectiveMicAdvanceFrames,
-                split: self.splitEnabled,
-                force: true
-            )
-            if !stereo.isEmpty, let w = self.writer, self.writeError == nil {
-                do {
-                    try w.append(samples: stereo)
-                } catch {
-                    self.writeError = error
-                }
-            }
+            self.commitSelectedTimeline(upTo: stopFrame)
 
             // Finalize
             guard let w = self.writer else {
@@ -841,6 +909,19 @@ final class RecordingManager: @unchecked Sendable {
             recentRecordings.insert(info, at: 0)
             if recentRecordings.count > 10 { recentRecordings.removeLast() }
             UserDefaults.standard.set(true, forKey: SettingsKey.hasRecordedBefore)
+            if let fingerprint = Self.fingerprint(for: info.url) {
+                latestFinalizedDescriptor = FinalizedRecordingDescriptor(
+                    recording: info,
+                    spans: finalizedSpans,
+                    split: recordingSplitSnapshot,
+                    format: recordingFormatSnapshot,
+                    quality: recordingQualitySnapshot,
+                    micAdvanceFrames: recordingMicAdvanceSnapshot,
+                    fingerprint: fingerprint
+                )
+            } else {
+                latestFinalizedDescriptor = nil
+            }
             state = .buffering
             if transcriptionEnabled && transcriptionService.modelsReady && !skipAutomaticTranscription {
                 transcribeRecording(info)
@@ -860,38 +941,40 @@ final class RecordingManager: @unchecked Sendable {
         // Stop accumulating samples for recording
         pendingLock.lock()
         pendingActive = false
-        let remainingSys = pendingSystemChunks
-        let remainingMic = pendingMicChunks
         pendingSystemChunks.removeAll()
         pendingMicChunks.removeAll()
         pendingLock.unlock()
-
-        // Flush remaining samples to disk
-        writeQueue.async { [weak self] in
-            guard let self, let w = self.writer, self.writeError == nil else { return }
-            let stereo = self.timelineAligner.append(
-                system: remainingSys,
-                mic: remainingMic,
-                micAdvanceFrames: self.effectiveMicAdvanceFrames,
-                split: self.splitEnabled,
-                force: true
-            )
-            if !stereo.isEmpty {
-                do {
-                    try w.append(samples: stereo)
-                } catch {
-                    self.writeError = error
-                }
-            }
-        }
 
         // Update bar states to paused
         waveformTracker.setBarState(.paused)
 
         // Track pause time
         pauseStartTime = Date()
+        let visible = currentVisibleCaptureRange()
+        selectionTimelineLock.withLock {
+            selectionTimeline.pause(at: visible.end)
+            if let edit = selectionTimeline.pauseEdit {
+                pausedSelectionRange = CaptureFrameRange(edit.out, edit.in)
+            }
+        }
 
         state = .paused
+    }
+
+    func updatePausedSelection(out: CaptureFrame? = nil, in: CaptureFrame? = nil) {
+        guard state == .paused else { return }
+        let visible = currentVisibleCaptureRange()
+        selectionTimelineLock.withLock {
+            selectionTimeline.updatePause(
+                out: out,
+                in: `in`,
+                now: visible.end,
+                visible: visible
+            )
+            if let edit = selectionTimeline.pauseEdit {
+                pausedSelectionRange = CaptureFrameRange(edit.out, edit.in)
+            }
+        }
     }
 
     func resumeRecording() {
@@ -904,16 +987,16 @@ final class RecordingManager: @unchecked Sendable {
             pauseStartTime = nil
         }
 
-        // Re-enable pending
+        let resumeFrame = currentVisibleCaptureRange().end
+        selectionTimelineLock.withLock {
+            selectionTimeline.resume(at: resumeFrame)
+        }
+
         pendingLock.lock()
         pendingActive = true
         pendingSystemChunks.removeAll()
         pendingMicChunks.removeAll()
         pendingLock.unlock()
-
-        writeQueue.async { [weak self] in
-            self?.timelineAligner.reset()
-        }
 
         // Update bar states to recorded
         waveformTracker.setBarState(.recorded)
@@ -924,6 +1007,7 @@ final class RecordingManager: @unchecked Sendable {
         }
 
         state = .recording
+        pausedSelectionRange = nil
     }
 
     func setMicEnabled(_ enabled: Bool) async {
@@ -944,10 +1028,18 @@ final class RecordingManager: @unchecked Sendable {
 
     func updateBufferDuration(_ seconds: Int) {
         guard state != .recording && state != .paused else { return }
+        if isEditingLatestRecording { cancelLatestRecordingEdit() }
+        latestFinalizedDescriptor = nil
         bufferDurationSeconds = seconds
         UserDefaults.standard.set(seconds, forKey: SettingsKey.bufferDuration)
-        systemBuffer.resize(durationSeconds: seconds, sampleRate: AudioConstants.sampleRateInt)
-        micBuffer.resize(durationSeconds: seconds, sampleRate: AudioConstants.sampleRateInt)
+        systemBuffer.resize(
+            durationSeconds: seconds + Self.storageMarginSeconds,
+            sampleRate: AudioConstants.sampleRateInt
+        )
+        micBuffer.resize(
+            durationSeconds: seconds + Self.storageMarginSeconds,
+            sampleRate: AudioConstants.sampleRateInt
+        )
         waveformTracker.resize(durationSeconds: seconds)
         // Clamp capture duration to not exceed new buffer size
         if captureDurationSeconds > seconds {
@@ -958,6 +1050,153 @@ final class RecordingManager: @unchecked Sendable {
     func updateCaptureDuration(_ seconds: Int) {
         captureDurationSeconds = max(5, min(seconds, bufferDurationSeconds))
         UserDefaults.standard.set(captureDurationSeconds, forKey: SettingsKey.captureDuration)
+    }
+
+    func updateLatestRecordingEdit(start: CaptureFrame? = nil, end: CaptureFrame? = nil) {
+        guard state == .buffering, let descriptor = latestFinalizedDescriptor,
+              descriptor.recording.url == recentRecordings.first?.url else { return }
+        if !isEditingLatestRecording {
+            editableDescriptor = descriptor
+            frozenFinalizedSystem = systemBuffer.snapshot()
+            frozenFinalizedMic = micBuffer.snapshot()
+            latestRecordingEditVisibleRange = visibleCaptureRange
+            latestRecordingEditWaveformAmplitudes = waveformAmplitudes
+            latestRecordingEditWaveformStates = waveformBarStates
+            latestRecordingEditFilledBarCount = filledBarCount
+            latestRecordingEditRange = latestRecordingBoundaryRange
+            editableFingerprint = descriptor.fingerprint
+            isEditingLatestRecording = true
+        }
+        guard var range = latestRecordingEditRange,
+              let visible = latestRecordingEditVisibleRange else { return }
+        if let start {
+            range.start = max(visible.start, min(start, range.end))
+        }
+        if let end {
+            range.end = min(visible.end, max(end, range.start))
+        }
+        latestRecordingEditRange = range
+    }
+
+    func cancelLatestRecordingEdit() {
+        isEditingLatestRecording = false
+        editableDescriptor = nil
+        latestRecordingEditRange = nil
+        latestRecordingEditVisibleRange = nil
+        latestRecordingEditWaveformAmplitudes = nil
+        latestRecordingEditWaveformStates = nil
+        latestRecordingEditFilledBarCount = nil
+        frozenFinalizedSystem = nil
+        frozenFinalizedMic = nil
+        editableFingerprint = nil
+    }
+
+    func applyLatestRecordingEdit() async {
+        guard !isApplyingLatestRecordingEdit, isEditingLatestRecording,
+              let descriptor = editableDescriptor,
+              let range = latestRecordingEditRange, !range.isEmpty,
+              let system = frozenFinalizedSystem,
+              let mic = frozenFinalizedMic,
+              let expectedFingerprint = editableFingerprint else { return }
+        isApplyingLatestRecordingEdit = true
+        defer { isApplyingLatestRecordingEdit = false }
+
+        let recording = descriptor.recording
+        await transcriptionService.cancelTranscriptionAndWait(for: recording.url)
+        guard Self.fingerprint(for: recording.url) == expectedFingerprint else { return }
+        let ext = descriptor.format.fileExtension
+        let staging = recording.url.deletingLastPathComponent().appendingPathComponent(
+            ".\(recording.url.deletingPathExtension().lastPathComponent).ripcord-edit-\(UUID().uuidString).\(ext)"
+        )
+        guard !FileManager.default.fileExists(atPath: staging.path) else { return }
+        do {
+            let plan = FinalizedBoundaryEditPlan(selection: range, descriptor: descriptor)
+            let prefix = plan.prefixRange.map {
+                packedCaptureRange(
+                    $0,
+                    systemSnapshot: system,
+                    micSnapshot: mic,
+                    split: descriptor.split,
+                    micAdvanceFrames: descriptor.micAdvanceFrames
+                )
+            } ?? []
+            let suffix = plan.suffixRange.map {
+                packedCaptureRange(
+                    $0,
+                    systemSnapshot: system,
+                    micSnapshot: mic,
+                    split: descriptor.split,
+                    micAdvanceFrames: descriptor.micAdvanceFrames
+                )
+            } ?? []
+            let expectedDuration =
+                Double(prefix.count / 2 + suffix.count / 2) / AudioConstants.sampleRate
+                + (plan.originalCrop.map { $0.upperBound - $0.lowerBound } ?? 0)
+            let rendered = try AudioEditRenderer.render(
+                from: recording.url,
+                originalCrop: plan.originalCrop,
+                prefix: prefix,
+                suffix: suffix,
+                to: staging,
+                format: descriptor.format,
+                quality: descriptor.quality
+            )
+            guard let stagedDuration = Self.audioDuration(url: staging),
+                  abs(stagedDuration - expectedDuration) < max(0.15, expectedDuration * 0.01),
+                  rendered.fileSize > 0,
+                  let stagedFile = try? AVAudioFile(forReading: staging),
+                  stagedFile.processingFormat.channelCount == 2 else {
+                throw AudioEditRenderer.RenderError.verificationFailed
+            }
+            Self.synchronizeFile(at: staging)
+            guard Self.fingerprint(for: recording.url) == expectedFingerprint else {
+                throw AudioEditRenderer.RenderError.targetChanged
+            }
+            _ = try FileManager.default.replaceItemAt(recording.url, withItemAt: staging,
+                                                        backupItemName: nil, options: [])
+            Self.synchronizeDirectory(containing: recording.url)
+            var updated = rendered
+            updated.url = recording.url
+            recentRecordings.removeAll { $0.url == recording.url }
+            recentRecordings.insert(updated, at: 0)
+            if recentRecordings.count > 10 { recentRecordings.removeLast() }
+            let newRanges = RecordingSelectionTimeline.coalesced(
+                descriptor.spans.compactMap { span -> CaptureFrameRange? in
+                    let start = max(range.start, span.source.start)
+                    let end = min(range.end, span.source.end)
+                    return end > start ? CaptureFrameRange(start, end) : nil
+                } + [plan.prefixRange, plan.suffixRange].compactMap { $0 }
+            )
+            var output: CaptureFrame = 0
+            let newSpans = newRanges.map { source -> SourceOutputSpan in
+                defer { output += CaptureFrame(source.count) }
+                return SourceOutputSpan(source: source, outputStart: output)
+            }
+            if let fingerprint = Self.fingerprint(for: recording.url) {
+                latestFinalizedDescriptor = FinalizedRecordingDescriptor(
+                    recording: updated,
+                    spans: newSpans,
+                    split: descriptor.split,
+                    format: descriptor.format,
+                    quality: descriptor.quality,
+                    micAdvanceFrames: descriptor.micAdvanceFrames,
+                    fingerprint: fingerprint
+                )
+            }
+            cancelLatestRecordingEdit()
+        } catch {
+            try? FileManager.default.removeItem(at: staging)
+            logger.error("Could not apply recording edit: \(error.localizedDescription)")
+        }
+    }
+
+    func transcriptIsStale(for recording: RecordingInfo) -> Bool {
+        let audioDate = (try? recording.url.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        guard let audioDate else { return false }
+        guard let transcriptDate = transcriptURLs(for: recording.url).compactMap({
+            (try? $0.resourceValues(forKeys: [.contentModificationDateKey]))?.contentModificationDate
+        }).max() else { return false }
+        return transcriptDate < audioDate
     }
 
     func updateOutputFormat(_ format: AudioOutputFormat) {
@@ -973,6 +1212,8 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func updateOutputDirectory(_ url: URL) {
+        if isEditingLatestRecording { cancelLatestRecordingEdit() }
+        latestFinalizedDescriptor = nil
         outputDirectory = url
         UserDefaults.standard.set(url.path, forKey: SettingsKey.outputDirectory)
         speakerProfileStore = SpeakerProfileStore(directory: url)
@@ -1348,6 +1589,23 @@ final class RecordingManager: @unchecked Sendable {
         if let idx = recentRecordings.firstIndex(where: { $0.url == oldURL }) {
             recentRecordings[idx].url = newURL
         }
+        if var descriptor = latestFinalizedDescriptor,
+           descriptor.recording.url == oldURL {
+            descriptor.recording.url = newURL
+            if let fingerprint = Self.fingerprint(for: newURL) {
+                latestFinalizedDescriptor = FinalizedRecordingDescriptor(
+                    recording: descriptor.recording,
+                    spans: descriptor.spans,
+                    split: descriptor.split,
+                    format: descriptor.format,
+                    quality: descriptor.quality,
+                    micAdvanceFrames: descriptor.micAdvanceFrames,
+                    fingerprint: fingerprint
+                )
+            } else {
+                latestFinalizedDescriptor = nil
+            }
+        }
 
         addToNameHistory(sanitized)
     }
@@ -1454,65 +1712,6 @@ final class RecordingManager: @unchecked Sendable {
             }
             count = frames * 2
         }
-    }
-
-    /// Packs system and mic audio into stereo frames using the appropriate mode.
-    func packStereo(_ system: [Float], _ mic: [Float]) -> [Float] {
-        splitEnabled
-            ? Self.interleave(system, mic)
-            : Self.mixStereo(system, mic)
-    }
-
-    static func shiftStereo(_ samples: [Float], byAdvancingFrames frames: Int) -> [Float] {
-        let ch = CircularAudioBuffer.channelsPerFrame
-        guard frames != 0, !samples.isEmpty else { return samples }
-        let frameCount = samples.count / ch
-        guard frameCount > 0 else { return samples }
-
-        if frames > 0 {
-            let dropSamples = min(samples.count, frames * ch)
-            var shifted = Array(samples.dropFirst(dropSamples))
-            shifted.append(contentsOf: repeatElement(Float(0), count: dropSamples))
-            return shifted
-        } else {
-            let padSamples = min(samples.count, -frames * ch)
-            var shifted = Array(repeating: Float(0), count: padSamples)
-            shifted.append(contentsOf: samples.prefix(max(0, samples.count - padSamples)))
-            return shifted
-        }
-    }
-
-    private static func prepareBufferedBoundary(
-        system: [Float], mic: [Float], micAdvanceFrames: Int, boundaryHostTime: UInt64
-    ) -> (system: [Float], mic: [Float], systemSeed: [AudioSampleChunk]) {
-        let channels = CircularAudioBuffer.channelsPerFrame
-        guard micAdvanceFrames > 0 else {
-            return (system, shiftStereo(mic, byAdvancingFrames: micAdvanceFrames), [])
-        }
-
-        let systemFrames = system.count / channels
-        let micFrames = mic.count / channels
-        let advance = min(micAdvanceFrames, systemFrames, micFrames)
-        guard advance > 0 else { return (system, mic, []) }
-
-        let advanceSamples = advance * channels
-        let systemPrefix = Array(system.dropLast(advanceSamples))
-        let advancedMic = Array(mic.dropFirst(advanceSamples))
-        let systemTail = Array(system.suffix(advanceSamples))
-        let boundaryNanos = AudioConvertHostTimeToNanos(boundaryHostTime)
-        let advanceNanos = UInt64(Double(advance) * 1_000_000_000.0 / AudioConstants.sampleRate)
-        let timing = AudioSampleTiming(
-            hostTime: AudioConvertNanosToHostTime(boundaryNanos > advanceNanos
-                ? boundaryNanos - advanceNanos : 0),
-            sampleTime: nil,
-            sampleRate: AudioConstants.sampleRate,
-            channelsPerFrame: channels
-        )
-        return (
-            systemPrefix,
-            advancedMic,
-            [AudioSampleChunk(samples: systemTail, timing: timing)]
-        )
     }
 
     /// Mixed mode: preserve stereo per source, sum L+L and R+R per frame.
@@ -1791,7 +1990,7 @@ final class RecordingManager: @unchecked Sendable {
                 / AudioConstants.sampleRate))
             let endHostTime = AudioConvertNanosToHostTime(nanos)
             chunk.samples.withUnsafeBufferPointer {
-                buffer.write($0, endHostTime: endHostTime)
+                buffer.write($0, startFrame: chunk.startFrame, endHostTime: endHostTime)
             }
         }
 
@@ -1808,6 +2007,7 @@ final class RecordingManager: @unchecked Sendable {
         pendingLock.lock()
         let pendingSys = pendingSystemChunks
         let pendingMic = pendingMicChunks
+        let recordingActive = pendingActive
         pendingSystemChunks.removeAll(keepingCapacity: true)
         pendingMicChunks.removeAll(keepingCapacity: true)
         pendingLock.unlock()
@@ -1823,9 +2023,15 @@ final class RecordingManager: @unchecked Sendable {
             }
         }
 
-        // Silence detection: use the already-computed peak amplitude.
-        // silenceSampleThreshold and silenceSampleCount are counted in frames;
-        if silenceEnabled {
+        let chunkStarts = (pendingSys + pendingMic).map(\.startFrame)
+        let chunkEnds = (pendingSys + pendingMic).map(\.endFrame)
+        let batchStart = chunkStarts.min()
+        let batchEnd = chunkEnds.max()
+        var includeBatch = recordingActive && batchEnd != nil
+
+        // Silence auto-pause remains independent from manual Pause, but its
+        // excluded source spans are now represented in the same EDL.
+        if silenceEnabled, recordingActive {
             if flushPeak < silenceThresholdLocal {
                 let sysFrames = pendingSys.reduce(0) { $0 + $1.frameCount }
                 let micFrames = pendingMic.reduce(0) { $0 + $1.frameCount }
@@ -1837,15 +2043,17 @@ final class RecordingManager: @unchecked Sendable {
                             self?.isSilencePaused = true
                         }
                     }
-                    // Discard samples and clear buffered alignment state during silence.
-                    timelineAligner.reset()
-                    return
+                    includeBatch = false
                 }
-                // Below threshold but timeout not yet reached — fall through and write normally
             } else {
                 silenceSampleCount = 0
                 if silenceDetected {
                     silenceDetected = false
+                    if let batchStart {
+                        selectionTimelineLock.withLock {
+                            selectionTimeline.beginLive(at: batchStart)
+                        }
+                    }
                     DispatchQueue.main.async { [weak self] in
                         self?.isSilencePaused = false
                     }
@@ -1853,23 +2061,88 @@ final class RecordingManager: @unchecked Sendable {
             }
         }
 
-        guard let w = writer, writeError == nil else { return }
+        if includeBatch, let batchEnd {
+            selectionTimelineLock.withLock {
+                if let batchStart {
+                    selectionTimeline.rebaseEmptyLive(at: batchStart)
+                    if emittedThroughSourceFrame == nil {
+                        emittedThroughSourceFrame = batchStart
+                    }
+                }
+                selectionTimeline.extendLive(to: batchEnd)
+            }
+        } else if recordingActive, silenceDetected, let batchStart {
+            selectionTimelineLock.withLock {
+                selectionTimeline.closeLive(at: batchStart)
+            }
+        }
 
-        let stereo = timelineAligner.append(
-            system: pendingSys,
-            mic: pendingMic,
-            micAdvanceFrames: effectiveMicAdvanceFrames,
-            split: splitEnabled,
-            force: false
-        )
+        let visible = currentVisibleCaptureRange()
+        selectionTimelineLock.withLock {
+            selectionTimeline.advancePaused(to: visible.end)
+        }
+        let safeCutoff = selectionTimelineLock.withLock {
+            waveformDisplayActive ? displayedVisibleStart : visible.start
+        }
+        commitSelectedTimeline(upTo: safeCutoff)
+    }
 
-        guard !stereo.isEmpty else { return }
+    /// Append only source-time decisions that have left the visible waveform.
+    /// A two-second storage margin keeps those frames readable while this runs.
+    private func commitSelectedTimeline(upTo cutoff: CaptureFrame) {
+        guard let writer, writeError == nil else { return }
+        let snapshot = selectionTimelineLock.withLock {
+            (
+                selectionTimeline.selectedSlices(
+                    from: emittedThroughSourceFrame ?? cutoff,
+                    to: cutoff,
+                    at: currentVisibleCaptureRange().end
+                ),
+                emittedThroughSourceFrame
+            )
+        }
+        guard let cursor = snapshot.1, cutoff > cursor else { return }
 
         do {
-            try w.append(samples: stereo)
+            for selected in snapshot.0 {
+                try writer.append(samples: packedCaptureRange(selected))
+            }
+            selectionTimelineLock.withLock {
+                emittedThroughSourceFrame = cutoff
+            }
         } catch {
             writeError = error
         }
+    }
+
+    private func packedCaptureRange(
+        _ range: CaptureFrameRange,
+        systemSnapshot: AudioBufferSnapshot? = nil,
+        micSnapshot: AudioBufferSnapshot? = nil,
+        split: Bool? = nil,
+        micAdvanceFrames: Int? = nil
+    ) -> [Float] {
+        guard !range.isEmpty else { return [] }
+        let systemSource = systemSnapshot ?? systemBuffer.snapshot(range: range)
+        let advance = micAdvanceFrames ?? effectiveMicAdvanceFrames
+        let micReadRange = CaptureFrameRange(
+            range.start + CaptureFrame(advance),
+            range.end + CaptureFrame(advance)
+        )
+        let rawMic = micSnapshot.map { alignedSnapshot($0, in: micReadRange) }
+            ?? micBuffer.snapshot(range: micReadRange)
+        let relabeledMic = AudioBufferSnapshot(
+            range: CaptureFrameRange(
+                rawMic.range.start - CaptureFrame(advance),
+                rawMic.range.end - CaptureFrame(advance)
+            ),
+            samples: rawMic.samples
+        )
+        let system = alignedSnapshot(systemSource, in: range).samples
+        let mic = alignedSnapshot(relabeledMic, in: range).samples
+        return (split ?? splitEnabled)
+            ? Self.interleave(system, mic)
+            : Self.mixStereo(system, mic)
     }
 
     private func consumeMeterPeaks() -> (system: Float, mic: Float) {
@@ -1884,6 +2157,7 @@ final class RecordingManager: @unchecked Sendable {
 
     func startWaveformTimer() {
         waveformTimer?.invalidate()
+        selectionTimelineLock.withLock { waveformDisplayActive = true }
 
         // Seed immediately from circular buffers
         updateWaveformFromBuffers()
@@ -1904,12 +2178,77 @@ final class RecordingManager: @unchecked Sendable {
         let (peaks, states) = waveformTracker.getBarPeaks()
         waveformAmplitudes = peaks
         waveformBarStates = states
+        visibleCaptureRange = currentVisibleCaptureRange()
+        selectionTimelineLock.withLock {
+            displayedVisibleStart = visibleCaptureRange.start
+        }
+        if state == .paused {
+            selectionTimelineLock.withLock {
+                selectionTimeline.advancePaused(to: visibleCaptureRange.end)
+                if let edit = selectionTimeline.pauseEdit {
+                    pausedSelectionRange = CaptureFrameRange(edit.out, edit.in)
+                }
+                recordingSelectedRanges = selectionTimeline.selectedRanges(
+                    at: visibleCaptureRange.end
+                )
+            }
+        } else if state == .recording {
+            recordingSelectedRanges = selectionTimelineLock.withLock {
+                selectionTimeline.selectedRanges(at: visibleCaptureRange.end)
+            }
+        }
         updateFilledBarCount()
+    }
+
+    private func currentVisibleCaptureRange() -> CaptureFrameRange {
+        let system = systemBuffer.visibleRange
+        let mic = micBuffer.visibleRange
+        let storageRange: CaptureFrameRange
+        switch (
+            systemCaptureEnabled ? system : nil,
+            micEnabled && micStatus == .active ? mic : nil
+        ) {
+        case let (.some(a), .some(b)): storageRange = commonRange(a, b)
+        case let (.some(a), .none): storageRange = a
+        case let (.none, .some(b)): storageRange = b
+        case (.none, .none):
+            if let system { storageRange = system }
+            else if let mic { storageRange = mic }
+            else { return CaptureFrameRange(0, 0) }
+        }
+        let visibleFrames = CaptureFrame(bufferDurationSeconds * AudioConstants.sampleRateInt)
+        return CaptureFrameRange(
+            max(storageRange.start, storageRange.end - visibleFrames),
+            storageRange.end
+        )
+    }
+
+    private func visibleRange(system: CaptureFrameRange, mic: CaptureFrameRange) -> CaptureFrameRange {
+        if system.isEmpty { return mic }
+        if mic.isEmpty { return system }
+        return commonRange(system, mic)
+    }
+
+    private func commonRange(_ a: CaptureFrameRange, _ b: CaptureFrameRange) -> CaptureFrameRange {
+        let start = max(a.start, b.start)
+        return CaptureFrameRange(start, max(start, min(a.end, b.end)))
+    }
+
+    private func alignedSnapshot(_ source: AudioBufferSnapshot, in range: CaptureFrameRange) -> AudioBufferSnapshot {
+        let clipped = range.clamped(to: source.range)
+        var samples = [Float](repeating: 0, count: range.count * CircularAudioBuffer.channelsPerFrame)
+        guard !clipped.isEmpty else { return AudioBufferSnapshot(range: range, samples: samples) }
+        let sourceOffset = Int(clipped.start - source.range.start) * CircularAudioBuffer.channelsPerFrame
+        let destinationOffset = Int(clipped.start - range.start) * CircularAudioBuffer.channelsPerFrame
+        let count = clipped.count * CircularAudioBuffer.channelsPerFrame
+        samples[destinationOffset..<(destinationOffset + count)] = source.samples[sourceOffset..<(sourceOffset + count)]
+        return AudioBufferSnapshot(range: range, samples: samples)
     }
 
     func stopWaveformTimer() {
         waveformTimer?.invalidate()
         waveformTimer = nil
+        selectionTimelineLock.withLock { waveformDisplayActive = false }
     }
 
     private func startMic() async {

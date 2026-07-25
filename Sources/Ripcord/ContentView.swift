@@ -4,6 +4,10 @@ import TranscribeKit
 import UniformTypeIdentifiers
 
 struct ContentView: View {
+    private enum WaveformDragHandle {
+        case capture, pausedOut, pausedIn, editStart, editEnd
+    }
+
     @Bindable var manager: RecordingManager
 
     @State private var transcribeTarget: RecordingInfo?
@@ -19,6 +23,7 @@ struct ContentView: View {
     @State private var resizeHovering = false
     @State private var micDevicePickerHovered = false
     @State private var micChannelPickerHovered = false
+    @State private var waveformDragHandle: WaveformDragHandle?
     // Stored outside @State to avoid MainActor-isolation issues in NotificationCenter closures
     private static nonisolated(unsafe) var settingsCloseObserver: NSObjectProtocol?
 
@@ -280,6 +285,7 @@ struct ContentView: View {
         let isRecording = manager.state == .recording
         let isPaused = manager.state == .paused
         let isCapturing = isRecording || isPaused
+        let isEditing = manager.isEditingLatestRecording
 
         VStack(spacing: 4) {
             HStack {
@@ -291,6 +297,13 @@ struct ContentView: View {
                     Text("Paused")
                         .font(.caption)
                         .foregroundStyle(.orange)
+                    Text("Out / In")
+                        .font(.caption2)
+                        .foregroundStyle(.secondary)
+                } else if isEditing {
+                    Text("Adjust recording")
+                        .font(.caption)
+                        .foregroundStyle(Color.accentColor)
                 } else {
                     Text("Capture: \(formatTime(manager.captureDurationSeconds))")
                         .font(.caption)
@@ -317,8 +330,30 @@ struct ContentView: View {
                         : Double(manager.captureDurationSeconds)
                     let captureFraction = effectiveCapture / bufMax
                     let handleX = width * (1 - captureFraction)
-                    let amps = manager.waveformAmplitudes
-                    let states = manager.waveformBarStates
+                    let visible = isEditing
+                        ? (manager.latestRecordingEditVisibleRange ?? manager.visibleCaptureRange)
+                        : manager.visibleCaptureRange
+                    let pausedRange = manager.pausedSelectionRange
+                    let xForFrame: (CaptureFrame) -> CGFloat? = { frame in
+                        guard !visible.isEmpty, frame >= visible.start, frame <= visible.end else { return nil }
+                        return width * CGFloat(Double(frame - visible.start) / Double(visible.count))
+                    }
+                    let pausedOutX = pausedRange.flatMap { xForFrame($0.start) }
+                    let pausedInX = pausedRange.flatMap { xForFrame($0.end) }
+                    let editRange = manager.latestRecordingEditRange
+                    let candidateRange = isEditing ? editRange : manager.latestRecordingBoundaryRange
+                    let editStartX = candidateRange.flatMap { xForFrame($0.start) }
+                    let editEndX = candidateRange.flatMap { xForFrame($0.end) }
+                    let amps = isEditing
+                        ? (manager.latestRecordingEditWaveformAmplitudes ?? manager.waveformAmplitudes)
+                        : manager.waveformAmplitudes
+                    let states = isEditing
+                        ? (manager.latestRecordingEditWaveformStates ?? manager.waveformBarStates)
+                        : manager.waveformBarStates
+                    let displayedFilledBarCount = isEditing
+                        ? (manager.latestRecordingEditFilledBarCount ?? manager.filledBarCount)
+                        : manager.filledBarCount
+                    let selectedRanges = manager.recordingSelectedRanges
 
                     Canvas { context, size in
                         let barWidth: CGFloat = 2
@@ -327,7 +362,7 @@ struct ContentView: View {
                         let midY = size.height / 2
 
                         let totalBars = max(1, Int(size.width / step))
-                        let filledBars = min(totalBars, manager.filledBarCount)
+                        let filledBars = min(totalBars, displayedFilledBarCount)
                         let startBar = totalBars - filledBars
 
                         for i in 0..<filledBars {
@@ -335,23 +370,36 @@ struct ContentView: View {
                             let amp = CGFloat(amps[100 - filledBars + i])
                             let barHeight = max(2, amp * size.height * 0.9)
                             let barState = states[100 - filledBars + i]
+                            let frame = visible.start + CaptureFrame(
+                                Double(visible.count) * Double((x + barWidth / 2) / max(1, size.width))
+                            )
+                            let isSelected = selectedRanges.contains {
+                                frame >= $0.start && frame < $0.end
+                            }
+                            let isInsideSession = selectedRanges.first.map {
+                                frame >= $0.start && frame <= visible.end
+                            } ?? false
 
                             let color: Color
-                            switch barState {
-                            case .recorded:
-                                color = .red
-                            case .paused:
-                                color = .orange
-                            case .priorRecorded:
-                                color = .red.opacity(0.4)
-                            case .priorPaused:
-                                color = .orange.opacity(0.4)
-                            case .idle:
-                                if isCapturing {
-                                    color = .primary.opacity(0.15)
-                                } else {
-                                    let isCaptured = x >= handleX
-                                    color = isCaptured ? .accentColor : .primary.opacity(0.15)
+                            if isCapturing && isInsideSession {
+                                color = isSelected ? .red : .orange
+                            } else {
+                                switch barState {
+                                case .recorded:
+                                    color = .red
+                                case .paused:
+                                    color = .orange
+                                case .priorRecorded:
+                                    color = .red.opacity(0.4)
+                                case .priorPaused:
+                                    color = .orange.opacity(0.4)
+                                case .idle:
+                                    if isCapturing {
+                                        color = .primary.opacity(0.15)
+                                    } else {
+                                        let isCaptured = x >= handleX
+                                        color = isCaptured ? .accentColor : .primary.opacity(0.15)
+                                    }
                                 }
                             }
 
@@ -364,26 +412,77 @@ struct ContentView: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(color))
                         }
 
-                        // Handle line — visible in all states. During recording the
-                        // handle slides left as recordingElapsed grows, marking the start
-                        // of the captured region.
-                        if handleX >= 0, handleX <= size.width {
+                        // The old capture handle stays put while recording. Paused
+                        // and finalized-edit states use explicit Out/In boundaries.
+                        if !isPaused && !isEditing, handleX >= 0, handleX <= size.width {
                             let handleRect = CGRect(x: handleX - 1, y: 0, width: 2, height: size.height)
                             context.fill(
                                 Path(roundedRect: handleRect, cornerRadius: 1),
                                 with: .color(.primary.opacity(0.5))
                             )
                         }
+                        for x in [pausedOutX, pausedInX, editStartX, editEndX].compactMap({ $0 }) {
+                            let rect = CGRect(x: x - 2, y: 0, width: 4, height: size.height)
+                            context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(.accentColor))
+                        }
                     }
-                    .allowsHitTesting(!isCapturing)
                     .gesture(
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
-                                let fraction = 1 - (value.location.x / width)
-                                let clamped = max(0, min(1, fraction))
-                                let seconds = Int(clamped * bufMax)
-                                manager.updateCaptureDuration(seconds)
+                                let fraction = max(0, min(1, value.location.x / width))
+                                let frame = visible.start
+                                    + CaptureFrame((Double(visible.count) * fraction).rounded())
+                                if waveformDragHandle == nil {
+                                    if isPaused {
+                                        let selection = pausedRange
+                                            ?? CaptureFrameRange(visible.end, visible.end)
+                                        if selection.start == selection.end {
+                                            guard abs(value.location.x - value.startLocation.x) >= 1 else {
+                                                return
+                                            }
+                                            waveformDragHandle = value.location.x < value.startLocation.x
+                                                ? .pausedOut : .pausedIn
+                                        } else {
+                                            waveformDragHandle = abs(frame - selection.start)
+                                                <= abs(frame - selection.end) ? .pausedOut : .pausedIn
+                                        }
+                                    } else if isEditing, let editRange {
+                                        waveformDragHandle = abs(frame - editRange.start)
+                                            <= abs(frame - editRange.end) ? .editStart : .editEnd
+                                    } else if !isRecording,
+                                              let candidateRange = manager.latestRecordingBoundaryRange {
+                                        let tolerance = CaptureFrame(
+                                            Double(max(1, visible.count)) * 12 / Double(max(1, width))
+                                        )
+                                        let startDistance = abs(frame - candidateRange.start)
+                                        let endDistance = abs(frame - candidateRange.end)
+                                        if min(startDistance, endDistance) <= tolerance {
+                                            waveformDragHandle = startDistance <= endDistance
+                                                ? .editStart : .editEnd
+                                        } else {
+                                            waveformDragHandle = .capture
+                                        }
+                                    } else if !isRecording {
+                                        waveformDragHandle = .capture
+                                    }
+                                }
+                                switch waveformDragHandle {
+                                case .pausedOut:
+                                    manager.updatePausedSelection(out: frame)
+                                case .pausedIn:
+                                    manager.updatePausedSelection(in: frame)
+                                case .editStart:
+                                    manager.updateLatestRecordingEdit(start: frame)
+                                case .editEnd:
+                                    manager.updateLatestRecordingEdit(end: frame)
+                                case .capture:
+                                    let seconds = Int((1 - fraction) * bufMax)
+                                    manager.updateCaptureDuration(seconds)
+                                case .none:
+                                    break
+                                }
                             }
+                            .onEnded { _ in waveformDragHandle = nil }
                     )
                 }
                 .background(RoundedRectangle(cornerRadius: 6).fill(.primary.opacity(0.05)))
@@ -491,13 +590,25 @@ struct ContentView: View {
                 .keyboardShortcut(".", modifiers: [.command])
             }
         } else if manager.state == .buffering {
-            Button(action: { manager.startRecording() }) {
-                Label("Record", systemImage: "record.circle")
-                    .frame(maxWidth: .infinity)
+            if manager.isEditingLatestRecording {
+                HStack(spacing: 8) {
+                    Button("Apply") { Task { await manager.applyLatestRecordingEdit() } }
+                        .controlSize(.large)
+                        .frame(maxWidth: .infinity)
+                        .disabled(manager.isApplyingLatestRecordingEdit)
+                    Button("Cancel") { manager.cancelLatestRecordingEdit() }
+                        .controlSize(.large)
+                        .disabled(manager.isApplyingLatestRecordingEdit)
+                }
+            } else {
+                Button(action: { manager.startRecording() }) {
+                    Label("Record", systemImage: "record.circle")
+                        .frame(maxWidth: .infinity)
+                }
+                .controlSize(.large)
+                .keyboardShortcut("r", modifiers: [])
+                .accessibilityHint("Starts recording, including buffered audio")
             }
-            .controlSize(.large)
-            .keyboardShortcut("r", modifiers: [])
-            .accessibilityHint("Starts recording, including buffered audio")
         } else if case .error(let msg) = manager.state {
             VStack(alignment: .leading, spacing: 4) {
                 Button(action: { Task { await manager.startBuffering() } }) {
@@ -1059,6 +1170,12 @@ private struct RecordingRowView: View {
             }
 
             if renamingURL != recording.url {
+                if manager.transcriptIsStale(for: recording) {
+                    Text("stale")
+                        .font(.caption2)
+                        .foregroundStyle(.orange)
+                        .help("Transcript is older than the audio file")
+                }
                 if let pending = manager.transcriptionService.unmatchedSpeakers[recording.url],
                    !pending.isEmpty {
                     let newCount = pending.filter { $0.name.isEmpty }.count
@@ -1107,7 +1224,7 @@ private struct RecordingRowView: View {
                         }
                         .buttonStyle(.plain)
                         .disabled(manager.transcriptionService.isTranscribing)
-                        .help(transcriptExists() ? "Re-transcribe" : "Transcribe")
+                        .help(manager.transcriptIsStale(for: recording) ? "Transcript is stale — re-transcribe" : (transcriptExists() ? "Re-transcribe" : "Transcribe"))
                         .instantPopover(isPresented: Binding(
                             get: { transcribeTarget?.url == recording.url },
                             set: { if !$0 { transcribeTarget = nil } }
@@ -1147,13 +1264,7 @@ private struct RecordingRowView: View {
     }
 
     private func transcriptExists() -> Bool {
-        let base = recording.url.deletingPathExtension()
-        for format in OutputFormat.allCases {
-            if FileManager.default.fileExists(atPath: base.appendingPathExtension(format.rawValue).path) {
-                return true
-            }
-        }
-        return false
+        !manager.transcriptURLs(for: recording.url).isEmpty
     }
 }
 

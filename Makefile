@@ -41,9 +41,7 @@ install: bundle
 	cp -R $(BUNDLE) $(INSTALL_DIR)/$(BUNDLE)
 
 test:
-	mkdir -p $(BUILD_DIR)
-	$(SWIFTC) -O -target arm64-apple-macosx14.2 -framework AudioToolbox -framework AVFoundation -parse-as-library -o $(BUILD_DIR)/test_components Sources/Ripcord/AudioConstants.swift Sources/Ripcord/CircularAudioBuffer.swift Sources/Ripcord/AudioFileWriter.swift Tests/test_components.swift
-	$(BUILD_DIR)/test_components
+	swift test
 
 E2E_BUNDLE = $(BUILD_DIR)/RipcordE2ETest.app
 

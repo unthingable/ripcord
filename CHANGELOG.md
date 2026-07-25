@@ -1,5 +1,17 @@
 # Changelog
 
+## [0.13.0] - 2026-07-25
+
+### Added
+  * Adjust manual pause boundaries with independent Out and In handles, including trimming the previous segment and backfilling buffered audio before resume.
+  * Adjust visible boundaries of the latest finalized recording with explicit Apply and Cancel actions.
+  * Indicate when an existing transcript is older than edited audio without automatically re-transcribing.
+
+### Changed
+  * Keep the visible recording tail editable until it scrolls out of the capture window.
+  * Apply finalized recording edits through verified, transactional WAV and M4A replacement.
+  * Run component and regression coverage through Swift Package Manager.
+
 ## [0.12.1] - 2026-06-18
 
 ### Fixed

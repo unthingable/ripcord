@@ -1,4 +1,5 @@
 import CoreAudio
+import AVFoundation
 import Foundation
 import XCTest
 @testable import Ripcord
@@ -87,6 +88,186 @@ final class AudioAlignmentAndStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.endHostTime, endpoint)
     }
 
+    func testCircularBufferUsesAbsoluteHalfOpenCaptureRanges() {
+        let buffer = CircularAudioBuffer(durationSeconds: 1, sampleRate: 4)
+        [Float](repeating: 1, count: 4).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 100)
+        }
+        [Float](repeating: 2, count: 4).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 102)
+        }
+        [Float](repeating: 3, count: 4).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 104)
+        }
+
+        XCTAssertEqual(buffer.visibleRange, CaptureFrameRange(102, 106))
+        let snapshot = buffer.snapshot(range: CaptureFrameRange(101, 105))
+        XCTAssertEqual(snapshot.range, CaptureFrameRange(102, 105))
+        XCTAssertEqual(snapshot.samples, [2, 2, 2, 2, 3, 3])
+    }
+
+    func testPauseSelectionExcludesGapAndNeverDuplicatesTrimmedTail() {
+        var timeline = RecordingSelectionTimeline()
+        timeline.start(with: CaptureFrameRange(0, 100))
+        timeline.pause(at: 100)
+        timeline.updatePause(
+            out: 80,
+            in: 150,
+            now: 200,
+            visible: CaptureFrameRange(0, 200)
+        )
+
+        XCTAssertEqual(
+            timeline.selectedRanges(at: 200),
+            [CaptureFrameRange(0, 80), CaptureFrameRange(150, 200)]
+        )
+        XCTAssertEqual(
+            timeline.selectedSlices(from: 50, to: 175, at: 200),
+            [CaptureFrameRange(50, 80), CaptureFrameRange(150, 175)]
+        )
+
+        timeline.resume(at: 200)
+        timeline.extendLive(to: 250)
+        timeline.stop(at: 250)
+        XCTAssertEqual(
+            timeline.selectedRanges(at: 250),
+            [CaptureFrameRange(0, 80), CaptureFrameRange(150, 250)]
+        )
+    }
+
+    func testStopWhilePausedResolvesPickupThroughStopFrame() {
+        var timeline = RecordingSelectionTimeline()
+        timeline.start(with: CaptureFrameRange(0, 100))
+        timeline.pause(at: 100)
+        timeline.updatePause(
+            out: 90,
+            in: 140,
+            now: 180,
+            visible: CaptureFrameRange(0, 180)
+        )
+        timeline.stop(at: 220)
+
+        XCTAssertEqual(
+            timeline.selectedRanges(at: 220),
+            [CaptureFrameRange(0, 90), CaptureFrameRange(140, 220)]
+        )
+    }
+
+    func testMultiplePauseEditsProduceOrderedDisjointRanges() {
+        var timeline = RecordingSelectionTimeline()
+        timeline.start(with: CaptureFrameRange(0, 100))
+        timeline.pause(at: 100)
+        timeline.updatePause(
+            out: 90,
+            in: 150,
+            now: 200,
+            visible: CaptureFrameRange(0, 200)
+        )
+        timeline.resume(at: 200)
+        timeline.extendLive(to: 250)
+        timeline.pause(at: 250)
+        timeline.updatePause(
+            out: 240,
+            in: 300,
+            now: 320,
+            visible: CaptureFrameRange(0, 320)
+        )
+        timeline.stop(at: 350)
+
+        XCTAssertEqual(
+            timeline.selectedRanges(at: 350),
+            [
+                CaptureFrameRange(0, 90),
+                CaptureFrameRange(150, 240),
+                CaptureFrameRange(300, 350),
+            ]
+        )
+        XCTAssertEqual(
+            timeline.outputSpans(at: 350).map(\.outputStart),
+            [0, 90, 180]
+        )
+    }
+
+    func testPinnedInFollowsNowWithoutBackfillingUntilMoved() {
+        var timeline = RecordingSelectionTimeline()
+        timeline.start(with: CaptureFrameRange(0, 100))
+        timeline.pause(at: 100)
+        timeline.advancePaused(to: 200)
+
+        XCTAssertEqual(
+            timeline.selectedRanges(at: 200),
+            [CaptureFrameRange(0, 100)]
+        )
+        XCTAssertEqual(timeline.pauseEdit?.in, 200)
+    }
+
+    func testFinalizedEditPlanComposesFrozenExtensionsAndEDLCrop() {
+        let descriptor = descriptor(
+            spans: [
+                SourceOutputSpan(source: CaptureFrameRange(100, 150), outputStart: 0),
+                SourceOutputSpan(source: CaptureFrameRange(200, 250), outputStart: 50),
+            ]
+        )
+        let plan = FinalizedBoundaryEditPlan(
+            selection: CaptureFrameRange(50, 260),
+            descriptor: descriptor
+        )
+
+        XCTAssertEqual(plan.prefixRange, CaptureFrameRange(50, 100))
+        XCTAssertEqual(plan.suffixRange, CaptureFrameRange(250, 260))
+        XCTAssertEqual(plan.originalCrop, 0...(100 / AudioConstants.sampleRate))
+    }
+
+    func testFinalizedEditPlanMapsAcrossExcludedPauseGap() {
+        let descriptor = descriptor(
+            spans: [
+                SourceOutputSpan(source: CaptureFrameRange(100, 150), outputStart: 0),
+                SourceOutputSpan(source: CaptureFrameRange(200, 250), outputStart: 50),
+            ]
+        )
+        let plan = FinalizedBoundaryEditPlan(
+            selection: CaptureFrameRange(125, 225),
+            descriptor: descriptor
+        )
+
+        XCTAssertNil(plan.prefixRange)
+        XCTAssertNil(plan.suffixRange)
+        XCTAssertEqual(
+            plan.originalCrop,
+            (25 / AudioConstants.sampleRate)...(75 / AudioConstants.sampleRate)
+        )
+    }
+
+    func testAudioEditRendererComposesPrefixCropAndSuffixForBothFormats() throws {
+        for format in AudioOutputFormat.allCases {
+            let directory = FileManager.default.temporaryDirectory
+                .appendingPathComponent("RipcordEditRenderer-\(UUID().uuidString)", isDirectory: true)
+            try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+            defer { try? FileManager.default.removeItem(at: directory) }
+            let source = directory.appendingPathComponent("source.\(format.fileExtension)")
+            let staging = directory.appendingPathComponent("staging.\(format.fileExtension)")
+            let sourceWriter = AudioFileWriter(url: source, format: format, quality: .medium)
+            try sourceWriter.open()
+            try sourceWriter.append(samples: [Float](repeating: 0.25, count: 48_000 * 2))
+            _ = try sourceWriter.finalize()
+
+            let extensionFrames = 4_800
+            let info = try AudioEditRenderer.render(
+                from: source,
+                originalCrop: 0.25...0.75,
+                prefix: [Float](repeating: 0.1, count: extensionFrames * 2),
+                suffix: [Float](repeating: 0.2, count: extensionFrames * 2),
+                to: staging,
+                format: format,
+                quality: .medium
+            )
+
+            XCTAssertEqual(info.duration, 0.7, accuracy: 0.03)
+            XCTAssertGreaterThan(info.fileSize, 0)
+            XCTAssertNoThrow(try AVAudioFile(forReading: staging))
+        }
+    }
+
     func testMicLatencyStoreClampsAndPersistsSettings() {
         let suiteName = "MicLatencyStoreTests-\(UUID().uuidString)"
         let defaults = UserDefaults(suiteName: suiteName)!
@@ -118,6 +299,22 @@ final class AudioAlignmentAndStoreTests: XCTestCase {
         return AudioSampleChunk(
             samples: samples,
             timing: AudioSampleTiming(hostTime: hostTime, sampleTime: Double(startFrame), sampleRate: AudioConstants.sampleRate, channelsPerFrame: 2)
+        )
+    }
+
+    private func descriptor(spans: [SourceOutputSpan]) -> FinalizedRecordingDescriptor {
+        FinalizedRecordingDescriptor(
+            recording: RecordingInfo(
+                url: URL(fileURLWithPath: "/tmp/test.wav"),
+                duration: Double(spans.last?.outputEnd ?? 0) / AudioConstants.sampleRate,
+                fileSize: 1
+            ),
+            spans: spans,
+            split: true,
+            format: .wav,
+            quality: .medium,
+            micAdvanceFrames: 0,
+            fingerprint: .init(size: 1, modificationDate: Date(timeIntervalSince1970: 0))
         )
     }
 }
