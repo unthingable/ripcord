@@ -421,10 +421,22 @@ struct ContentView: View {
                                 with: .color(.primary.opacity(0.5))
                             )
                         }
-                        for x in [pausedOutX, pausedInX, editStartX, editEndX].compactMap({ $0 }) {
-                            let rect = CGRect(x: x - 2, y: 0, width: 4, height: size.height)
-                            context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(.accentColor))
-                        }
+                        drawBoundaryHandle(
+                            context: &context, size: size,
+                            position: pausedOutX, label: "OUT", labelY: 7
+                        )
+                        drawBoundaryHandle(
+                            context: &context, size: size,
+                            position: pausedInX, label: "IN", labelY: size.height - 7
+                        )
+                        drawBoundaryHandle(
+                            context: &context, size: size,
+                            position: editStartX, label: "START", labelY: 7
+                        )
+                        drawBoundaryHandle(
+                            context: &context, size: size,
+                            position: editEndX, label: "END", labelY: size.height - 7
+                        )
                     }
                     .gesture(
                         DragGesture(minimumDistance: 0)
@@ -493,6 +505,44 @@ struct ContentView: View {
             }
             .frame(height: 44)
         }
+    }
+
+    private func drawBoundaryHandle(
+        context: inout GraphicsContext,
+        size: CGSize,
+        position: CGFloat?,
+        label: String,
+        labelY: CGFloat
+    ) {
+        guard let position else { return }
+        let lineX = max(2, min(size.width - 2, position))
+        let line = CGRect(x: lineX - 1.5, y: 0, width: 3, height: size.height)
+        context.fill(
+            Path(roundedRect: line, cornerRadius: 1.5),
+            with: .color(.accentColor)
+        )
+
+        let badgeWidth = max(22, CGFloat(label.count * 6 + 8))
+        let badgeCenterX = max(
+            badgeWidth / 2,
+            min(size.width - badgeWidth / 2, lineX)
+        )
+        let badge = CGRect(
+            x: badgeCenterX - badgeWidth / 2,
+            y: labelY - 6,
+            width: badgeWidth,
+            height: 12
+        )
+        context.fill(
+            Path(roundedRect: badge, cornerRadius: 3),
+            with: .color(.accentColor)
+        )
+        context.draw(
+            Text(label)
+                .font(.system(size: 8, weight: .bold))
+                .foregroundStyle(.white),
+            at: CGPoint(x: badgeCenterX, y: labelY)
+        )
     }
 
     // MARK: - Level Meters

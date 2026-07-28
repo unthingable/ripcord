@@ -106,6 +106,51 @@ final class AudioAlignmentAndStoreTests: XCTestCase {
         XCTAssertEqual(snapshot.samples, [2, 2, 2, 2, 3, 3])
     }
 
+    func testCircularBufferRepresentsForwardTimestampGapAsSilence() {
+        let buffer = CircularAudioBuffer(durationSeconds: 1, sampleRate: 6)
+        [Float](repeating: 1, count: 2).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 10)
+        }
+        [Float](repeating: 2, count: 2).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 13)
+        }
+
+        XCTAssertEqual(buffer.visibleRange, CaptureFrameRange(10, 14))
+        XCTAssertEqual(buffer.snapshot().samples, [1, 1, 0, 0, 0, 0, 2, 2])
+    }
+
+    func testCircularBufferTrimsOverlappingTimestampedChunk() {
+        let buffer = CircularAudioBuffer(durationSeconds: 1, sampleRate: 6)
+        [Float](arrayLiteral: 1, 1, 2, 2).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 10)
+        }
+        [Float](arrayLiteral: 9, 9, 3, 3).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 11)
+        }
+
+        XCTAssertEqual(buffer.visibleRange, CaptureFrameRange(10, 13))
+        XCTAssertEqual(buffer.snapshot().samples, [1, 1, 2, 2, 3, 3])
+    }
+
+    func testCircularBufferRebasesAcrossTimestampDiscontinuities() {
+        let buffer = CircularAudioBuffer(durationSeconds: 1, sampleRate: 4)
+        [Float](repeating: 1, count: 2).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 10, endHostTime: 123)
+        }
+        [Float](repeating: 2, count: 2).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 100)
+        }
+        XCTAssertEqual(buffer.visibleRange, CaptureFrameRange(100, 101))
+        XCTAssertEqual(buffer.snapshot().samples, [2, 2])
+        XCTAssertNil(buffer.readWithEndHostTime(lastNFrames: 1).endHostTime)
+
+        [Float](repeating: 3, count: 2).withUnsafeBufferPointer {
+            buffer.write($0, startFrame: 0)
+        }
+        XCTAssertEqual(buffer.visibleRange, CaptureFrameRange(0, 1))
+        XCTAssertEqual(buffer.snapshot().samples, [3, 3])
+    }
+
     func testPauseSelectionExcludesGapAndNeverDuplicatesTrimmedTail() {
         var timeline = RecordingSelectionTimeline()
         timeline.start(with: CaptureFrameRange(0, 100))

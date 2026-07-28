@@ -58,23 +58,90 @@ final class CircularAudioBuffer: @unchecked Sendable {
         lock.lock()
         defer { lock.unlock() }
         let frames = samples.count / Self.channelsPerFrame
-        guard frames > 0 else { return }
-        let start = startFrame ?? latestFrame ?? 0
-        let capacitySamples = capacityFrames * Self.channelsPerFrame
-        for i in 0..<samples.count {
-            buffer[writeHead] = samples[i]
-            writeHead = (writeHead + 1) % capacitySamples
-            meterPeakAccum = max(meterPeakAccum, abs(samples[i]))
+        guard frames > 0, capacityFrames > 0 else { return }
+        let incomingStart = startFrame ?? latestFrame ?? 0
+        var sourceOffsetFrames = 0
+        var framesToWrite = frames
+
+        if latestFrame == nil {
+            resetLocked(at: incomingStart)
+        } else if let latestFrame {
+            let delta = incomingStart - latestFrame
+            if delta >= CaptureFrame(capacityFrames) || delta <= -CaptureFrame(capacityFrames) {
+                // A route/device restart can jump to an unrelated clock epoch.
+                // Rebase instead of letting absolute-frame math diverge from ring storage.
+                resetLocked(at: incomingStart)
+            } else if delta > 0 {
+                appendSilenceLocked(frames: Int(delta))
+                self.latestFrame = latestFrame + delta
+            } else if delta < 0 {
+                let overlap = Int(-delta)
+                guard overlap < frames else { return }
+                sourceOffsetFrames = overlap
+                framesToWrite -= overlap
+            }
         }
-        totalWritten += frames
-        let end = start + CaptureFrame(frames)
-        latestFrame = end
-        if totalWritten <= capacityFrames {
-            oldestFrame = oldestFrame ?? start
-        } else {
-            oldestFrame = end - CaptureFrame(capacityFrames)
+
+        appendSamplesLocked(
+            samples,
+            sourceOffsetFrames: sourceOffsetFrames,
+            frameCount: framesToWrite
+        )
+        let appendStart = latestFrame ?? incomingStart
+        latestFrame = appendStart + CaptureFrame(framesToWrite)
+        if let latestFrame {
+            oldestFrame = latestFrame - CaptureFrame(totalWritten)
         }
         if let endHostTime { latestEndHostTime = endHostTime }
+    }
+
+    private func resetLocked(at frame: CaptureFrame) {
+        writeHead = 0
+        totalWritten = 0
+        oldestFrame = frame
+        latestFrame = frame
+        latestEndHostTime = nil
+    }
+
+    private func appendSamplesLocked(
+        _ samples: UnsafeBufferPointer<Float>,
+        sourceOffsetFrames: Int,
+        frameCount: Int
+    ) {
+        let capacitySamples = capacityFrames * Self.channelsPerFrame
+        let startSample = sourceOffsetFrames * Self.channelsPerFrame
+        let sampleCount = frameCount * Self.channelsPerFrame
+        for index in startSample..<(startSample + sampleCount) {
+            buffer[writeHead] = samples[index]
+            writeHead = (writeHead + 1) % capacitySamples
+            meterPeakAccum = max(meterPeakAccum, abs(samples[index]))
+        }
+        totalWritten = min(capacityFrames, totalWritten + frameCount)
+    }
+
+    private func appendSilenceLocked(frames: Int) {
+        guard frames > 0 else { return }
+        let capacitySamples = capacityFrames * Self.channelsPerFrame
+        let sampleCount = frames * Self.channelsPerFrame
+        if sampleCount >= capacitySamples {
+            buffer = [Float](repeating: 0, count: capacitySamples)
+            writeHead = (writeHead + sampleCount) % capacitySamples
+        } else {
+            let firstCount = min(sampleCount, capacitySamples - writeHead)
+            buffer.replaceSubrange(
+                writeHead..<(writeHead + firstCount),
+                with: repeatElement(0, count: firstCount)
+            )
+            let remainder = sampleCount - firstCount
+            if remainder > 0 {
+                buffer.replaceSubrange(
+                    0..<remainder,
+                    with: repeatElement(0, count: remainder)
+                )
+            }
+            writeHead = (writeHead + sampleCount) % capacitySamples
+        }
+        totalWritten = min(capacityFrames, totalWritten + frames)
     }
 
     /// Chronological snapshot for an absolute range. Requests outside the
