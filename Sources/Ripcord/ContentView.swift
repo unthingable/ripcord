@@ -1258,8 +1258,7 @@ private struct RecordingRowView: View {
 
                     if manager.transcriptionService.transcribingURL == recording.url {
                         TranscriptionProgressIndicator(
-                            phase: manager.transcriptionService.transcriptionPhase,
-                            progress: manager.transcriptionService.transcriptionProgress
+                            estimate: manager.transcriptionService.transcriptionProgressEstimate
                         ) {
                             manager.transcriptionService.cancelTranscription()
                         }
@@ -1321,54 +1320,72 @@ private struct RecordingRowView: View {
 // MARK: - Transcription Progress
 
 private struct TranscriptionProgressIndicator: View {
-    let phase: TranscriptionPhase?
-    let progress: Double?
+    let estimate: TranscriptionProgressEstimate?
     var onCancel: () -> Void
     @State private var isHovered = false
 
     var body: some View {
-        Button(action: onCancel) {
-            ZStack {
-                if let progress {
-                    ProgressView(value: progress)
-                        .progressViewStyle(.circular)
-                        .controlSize(.small)
-                        .opacity(isHovered ? 0 : 1)
-                } else {
-                    ProgressView()
-                        .controlSize(.small)
-                        .opacity(isHovered ? 0 : 1)
+        TimelineView(.periodic(from: .now, by: 1)) { timeline in
+            let snapshot = estimate?.snapshot(at: timeline.date)
+                ?? TranscriptionProgressSnapshot(
+                    fraction: 0,
+                    elapsed: 0,
+                    estimatedRemaining: nil
+                )
+            Button(action: onCancel) {
+                ZStack {
+                    ZStack {
+                        Circle()
+                            .stroke(.primary.opacity(0.15), lineWidth: 2)
+                        Circle()
+                            .trim(from: 0, to: snapshot.fraction)
+                            .stroke(
+                                Color.accentColor,
+                                style: StrokeStyle(lineWidth: 2, lineCap: .round)
+                            )
+                            .rotationEffect(.degrees(-90))
+                    }
+                    .frame(width: 14, height: 14)
+                    .opacity(isHovered ? 0 : 1)
+
+                    Image(systemName: "stop.fill")
+                        .font(.body)
+                        .foregroundStyle(.secondary)
+                        .opacity(isHovered ? 1 : 0)
                 }
-                Image(systemName: "stop.fill")
-                    .font(.body)
-                    .foregroundStyle(.secondary)
-                    .opacity(isHovered ? 1 : 0)
             }
+            .buttonStyle(.plain)
+            .help(helpText(snapshot))
+            .accessibilityLabel("Cancel transcription")
+            .accessibilityValue(accessibilityValue(snapshot))
         }
-        .buttonStyle(.plain)
-        .help(helpText)
-        .accessibilityLabel("Cancel transcription")
-        .accessibilityValue(accessibilityValue)
         .onHover { isHovered = $0 }
     }
 
-    private var helpText: String {
+    private func helpText(_ snapshot: TranscriptionProgressSnapshot) -> String {
         let stage: String
-        switch phase {
-        case .preparing: stage = "Preparing audio"
-        case .transcribing: stage = "Transcribing"
-        case .diarizing: stage = "Identifying speakers"
-        case .finalizing: stage = "Finalizing transcript"
-        case nil: stage = "Transcribing"
+        switch estimate?.phase {
+        case TranscriptionPhase.preparing.rawValue: stage = "Preparing audio"
+        case TranscriptionPhase.transcribing.rawValue: stage = "Transcribing"
+        case TranscriptionPhase.diarizing.rawValue: stage = "Identifying speakers"
+        case TranscriptionPhase.finalizing.rawValue: stage = "Finalizing transcript"
+        default: stage = "Transcribing"
         }
-        if let progress {
-            return "\(stage) \(Int((progress * 100).rounded()))% - click to cancel"
+        let elapsed = formatDuration(snapshot.elapsed)
+        if let remaining = snapshot.estimatedRemaining {
+            return "\(stage) · \(elapsed) elapsed · ~\(formatDuration(remaining)) remaining · click to cancel"
         }
-        return "\(stage) - click to cancel"
+        return "\(stage) · \(elapsed) elapsed · click to cancel"
     }
 
-    private var accessibilityValue: String {
-        return helpText.replacingOccurrences(of: " - click to cancel", with: "")
+    private func accessibilityValue(_ snapshot: TranscriptionProgressSnapshot) -> String {
+        helpText(snapshot).replacingOccurrences(of: " · click to cancel", with: "")
+    }
+
+    private func formatDuration(_ duration: TimeInterval) -> String {
+        let seconds = max(0, Int(duration.rounded()))
+        if seconds < 60 { return "\(seconds)s" }
+        return "\(seconds / 60)m \(seconds % 60)s"
     }
 }
 

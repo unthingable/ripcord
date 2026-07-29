@@ -1,6 +1,7 @@
 import CoreAudio
 import AVFoundation
 import Foundation
+import TranscribeKit
 import XCTest
 @testable import Ripcord
 
@@ -149,6 +150,63 @@ final class AudioAlignmentAndStoreTests: XCTestCase {
         }
         XCTAssertEqual(buffer.visibleRange, CaptureFrameRange(0, 1))
         XCTAssertEqual(buffer.snapshot().samples, [3, 3])
+    }
+
+    func testOverallTranscriptionProgressDoesNotResetBetweenPhases() {
+        let start = Date(timeIntervalSince1970: 1_000)
+        let phases: [TranscriptionPhase] = [
+            .preparing, .transcribing, .diarizing, .finalizing
+        ]
+        var estimate = TranscriptionProgressEstimate(
+            phases: phases,
+            expectedDurations: [
+                TranscriptionPhase.preparing.rawValue: 10,
+                TranscriptionPhase.transcribing.rawValue: 40,
+                TranscriptionPhase.diarizing.rawValue: 30,
+                TranscriptionPhase.finalizing.rawValue: 5
+            ],
+            startedAt: start
+        )
+
+        _ = estimate.update(
+            phase: .transcribing,
+            reportedProgress: 0.5,
+            at: start.addingTimeInterval(10)
+        )
+        let transcription = estimate.snapshot(at: start.addingTimeInterval(30))
+        _ = estimate.update(
+            phase: .diarizing,
+            reportedProgress: nil,
+            at: start.addingTimeInterval(50)
+        )
+        let diarizationStart = estimate.snapshot(at: start.addingTimeInterval(50))
+        let diarizationLater = estimate.snapshot(at: start.addingTimeInterval(60))
+
+        XCTAssertGreaterThan(diarizationStart.fraction, transcription.fraction)
+        XCTAssertGreaterThan(diarizationLater.fraction, diarizationStart.fraction)
+        XCTAssertLessThan(diarizationLater.fraction, 1)
+        XCTAssertNotNil(diarizationLater.estimatedRemaining)
+    }
+
+    func testTranscriptionTimingStoreLearnsCompletedPhaseRate() {
+        let suiteName = "TranscriptionTimingStoreTests-\(UUID().uuidString)"
+        let defaults = UserDefaults(suiteName: suiteName)!
+        defer { defaults.removePersistentDomain(forName: suiteName) }
+        let store = TranscriptionTimingStore(defaults: defaults, storageKey: "timings")
+
+        store.record(
+            [CompletedTranscriptionPhase(phase: TranscriptionPhase.diarizing.rawValue, duration: 50)],
+            profile: "v3.offline.balanced",
+            audioDuration: 100
+        )
+        let estimates = store.expectedDurations(
+            profile: "v3.offline.balanced",
+            audioDuration: 200,
+            phases: [.diarizing],
+            diarizationEngine: .offline
+        )
+
+        XCTAssertEqual(estimates[TranscriptionPhase.diarizing.rawValue], 100)
     }
 
     func testPauseSelectionExcludesGapAndNeverDuplicatesTrimmedTail() {

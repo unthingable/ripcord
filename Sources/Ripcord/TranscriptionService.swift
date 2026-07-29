@@ -37,9 +37,7 @@ private struct PendingSpeakers: Codable {
 final class TranscriptionService: @unchecked Sendable {
     var state: TranscriptionState = .idle
     var transcribingURL: URL?
-    var transcriptionPhase: TranscriptionPhase?
-    var transcriptionProgress: Double?
-    var transcriptionStartedAt: Date?
+    var transcriptionProgressEstimate: TranscriptionProgressEstimate?
 
     /// Unmatched speakers from the most recent transcription, keyed by audio file URL.
     var unmatchedSpeakers: [URL: [UnmatchedSpeaker]] = [:]
@@ -69,6 +67,10 @@ final class TranscriptionService: @unchecked Sendable {
     private let transcriptionOperationLock = NSLock()
     private var activeTranscriptionID: UUID?
     private var requestedTranscriptionURL: URL?
+    private let transcriptionTimingStore = TranscriptionTimingStore()
+    private var transcriptionTimingProfile: String?
+    private var transcriptionAudioDuration: TimeInterval = 0
+    private var completedPhaseTimings: [CompletedTranscriptionPhase] = []
 
     // MARK: - Model Lifecycle
 
@@ -105,8 +107,28 @@ final class TranscriptionService: @unchecked Sendable {
 
     // MARK: - Transcription Pipeline
 
-    func startTranscription(fileURL: URL, config: TranscriptionConfig, overwrite: Bool = false) {
+    func startTranscription(
+        fileURL: URL,
+        audioDuration: TimeInterval,
+        config: TranscriptionConfig,
+        overwrite: Bool = false
+    ) {
         let operationID = UUID()
+        let startedAt = Date()
+        let phases: [TranscriptionPhase] = config.diarizationEnabled
+            ? [.preparing, .transcribing, .diarizing, .finalizing]
+            : [.preparing, .transcribing, .finalizing]
+        let timingProfile = [
+            config.asrModelVersion.rawValue,
+            config.diarizationEnabled ? config.diarizationEngine.rawValue : "none",
+            config.diarizationQuality.rawValue
+        ].joined(separator: ".")
+        let expectedDurations = transcriptionTimingStore.expectedDurations(
+            profile: timingProfile,
+            audioDuration: audioDuration,
+            phases: phases,
+            diarizationEngine: config.diarizationEngine
+        )
         let previousTask = transcriptionOperationLock.withLock { () -> Task<Void, Never>? in
             let task = transcriptionTask
             transcriptionTask = nil
@@ -126,6 +148,14 @@ final class TranscriptionService: @unchecked Sendable {
                     self.transcribingURL = nil
                 }
                 self.lastTranscriptionError = nil
+                self.transcriptionProgressEstimate = TranscriptionProgressEstimate(
+                    phases: phases,
+                    expectedDurations: expectedDurations,
+                    startedAt: startedAt
+                )
+                self.transcriptionTimingProfile = timingProfile
+                self.transcriptionAudioDuration = audioDuration
+                self.completedPhaseTimings = []
             }
             do {
                 _ = try await self.transcribe(
@@ -137,9 +167,7 @@ final class TranscriptionService: @unchecked Sendable {
                     self.lastTranscriptionError = error.localizedDescription
                     self.state = .ready
                     self.transcribingURL = nil
-                    self.transcriptionPhase = nil
-                    self.transcriptionProgress = nil
-                    self.transcriptionStartedAt = nil
+                    self.clearProgressEstimate()
                 }
             }
             self.clearOperationIfCurrent(operationID)
@@ -165,9 +193,7 @@ final class TranscriptionService: @unchecked Sendable {
         task?.cancel()
         state = .ready
         transcribingURL = nil
-        transcriptionPhase = nil
-        transcriptionProgress = nil
-        transcriptionStartedAt = nil
+        clearProgressEstimate()
     }
 
     /// Used by audio replacement: cancellation is not enough because a
@@ -187,9 +213,7 @@ final class TranscriptionService: @unchecked Sendable {
             if self.transcribingURL == fileURL {
                 self.state = .ready
                 self.transcribingURL = nil
-                self.transcriptionPhase = nil
-                self.transcriptionProgress = nil
-                self.transcriptionStartedAt = nil
+                self.clearProgressEstimate()
             }
         }
     }
@@ -208,9 +232,6 @@ final class TranscriptionService: @unchecked Sendable {
         await updateCurrentOperation(operationID) {
             self.state = .transcribing
             self.transcribingURL = fileURL
-            self.transcriptionPhase = .preparing
-            self.transcriptionProgress = nil
-            self.transcriptionStartedAt = Date()
         }
 
         do {
@@ -242,8 +263,15 @@ final class TranscriptionService: @unchecked Sendable {
             ) { [weak self] phase, progress in
                 Task { @MainActor in
                     guard let self, self.isCurrentOperation(operationID) else { return }
-                    self.transcriptionPhase = phase
-                    self.transcriptionProgress = progress
+                    var estimate = self.transcriptionProgressEstimate
+                    if let completed = estimate?.update(
+                        phase: phase,
+                        reportedProgress: progress,
+                        at: Date()
+                    ) {
+                        self.completedPhaseTimings.append(completed)
+                    }
+                    self.transcriptionProgressEstimate = estimate
                 }
             }
             try ensureCurrentOperation(operationID)
@@ -302,18 +330,40 @@ final class TranscriptionService: @unchecked Sendable {
             }
 
             await updateCurrentOperation(operationID) {
+                self.finishProgressEstimate()
                 self.state = .ready; self.transcribingURL = nil
-                self.transcriptionPhase = nil
-                self.transcriptionProgress = nil
-                self.transcriptionStartedAt = nil
             }
             return transcriptURL
         } catch {
             await updateCurrentOperation(operationID) {
                 self.state = .ready; self.transcribingURL = nil
+                self.clearProgressEstimate()
             }
             throw error
         }
+    }
+
+    @MainActor
+    private func finishProgressEstimate() {
+        if var estimate = transcriptionProgressEstimate {
+            completedPhaseTimings.append(estimate.finish(at: Date()))
+        }
+        if let profile = transcriptionTimingProfile {
+            transcriptionTimingStore.record(
+                completedPhaseTimings,
+                profile: profile,
+                audioDuration: transcriptionAudioDuration
+            )
+        }
+        clearProgressEstimate()
+    }
+
+    @MainActor
+    private func clearProgressEstimate() {
+        transcriptionProgressEstimate = nil
+        transcriptionTimingProfile = nil
+        transcriptionAudioDuration = 0
+        completedPhaseTimings = []
     }
 
     private func isCurrentOperation(_ operationID: UUID) -> Bool {

@@ -1294,7 +1294,12 @@ final class RecordingManager: @unchecked Sendable {
     func transcribeRecording(_ recording: RecordingInfo, config: TranscriptionConfig? = nil, overwrite: Bool = false) {
         guard transcriptionService.modelsReady else { return }
         let effectiveConfig = config ?? transcriptionConfig
-        transcriptionService.startTranscription(fileURL: recording.url, config: effectiveConfig, overwrite: overwrite)
+        transcriptionService.startTranscription(
+            fileURL: recording.url,
+            audioDuration: recording.duration,
+            config: effectiveConfig,
+            overwrite: overwrite
+        )
     }
 
     func transcribeFile(_ url: URL, config: TranscriptionConfig? = nil, overwrite: Bool = false) {
