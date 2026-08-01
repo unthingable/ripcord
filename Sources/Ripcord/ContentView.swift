@@ -56,6 +56,7 @@ struct ContentView: View {
             // Capture duration scrubber with level meters
             if manager.state == .buffering || manager.state == .recording || manager.state == .paused {
                 captureSlider
+                    .allowsHitTesting(!manager.isApplyingLatestRecordingEdit)
                     .onAppear { manager.startWaveformTimer() }
                     .onDisappear { manager.stopWaveformTimer() }
             }
@@ -213,9 +214,15 @@ struct ContentView: View {
     private var statusSection: some View {
         HStack {
             HStack(spacing: 6) {
-                Circle()
-                    .fill(statusColor)
-                    .frame(width: 8, height: 8)
+                if manager.isApplyingLatestRecordingEdit {
+                    ProgressView()
+                        .controlSize(.small)
+                        .transaction { $0.disablesAnimations = false }
+                } else {
+                    Circle()
+                        .fill(statusColor)
+                        .frame(width: 8, height: 8)
+                }
                 Text(statusText)
                     .font(.headline)
             }
@@ -256,6 +263,9 @@ struct ContentView: View {
     }
 
     private var statusText: String {
+        if manager.isApplyingLatestRecordingEdit {
+            return "Applying recording edit…"
+        }
         switch manager.state {
         case .starting:
             return "Starting..."
@@ -641,14 +651,27 @@ struct ContentView: View {
             }
         } else if manager.state == .buffering {
             if manager.isEditingLatestRecording {
-                HStack(spacing: 8) {
-                    Button("Apply") { Task { await manager.applyLatestRecordingEdit() } }
-                        .controlSize(.large)
-                        .frame(maxWidth: .infinity)
-                        .disabled(manager.isApplyingLatestRecordingEdit)
-                    Button("Cancel") { manager.cancelLatestRecordingEdit() }
-                        .controlSize(.large)
-                        .disabled(manager.isApplyingLatestRecordingEdit)
+                VStack(alignment: .leading, spacing: 4) {
+                    if manager.isApplyingLatestRecordingEdit {
+                        Text("Saving changes…")
+                            .frame(maxWidth: .infinity)
+                            .foregroundStyle(.secondary)
+                            .controlSize(.large)
+                    } else {
+                        HStack(spacing: 8) {
+                            Button("Apply") { Task { await manager.applyLatestRecordingEdit() } }
+                                .controlSize(.large)
+                                .frame(maxWidth: .infinity)
+                            Button("Cancel") { manager.cancelLatestRecordingEdit() }
+                                .controlSize(.large)
+                        }
+                    }
+                    if let error = manager.latestRecordingEditError {
+                        Text("Couldn’t apply edit: \(error)")
+                            .font(.caption2)
+                            .foregroundStyle(.red)
+                            .fixedSize(horizontal: false, vertical: true)
+                    }
                 }
             } else {
                 Button(action: { manager.startRecording() }) {

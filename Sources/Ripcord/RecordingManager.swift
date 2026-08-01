@@ -154,6 +154,7 @@ final class RecordingManager: @unchecked Sendable {
         return CaptureFrameRange(start, end)
     }
     var isApplyingLatestRecordingEdit = false
+    var latestRecordingEditError: String?
     var systemLevel: Float = 0
     var micLevel: Float = 0
     var selectedMicUID: String?
@@ -1056,6 +1057,7 @@ final class RecordingManager: @unchecked Sendable {
         guard state == .buffering, let descriptor = latestFinalizedDescriptor,
               descriptor.recording.url == recentRecordings.first?.url else { return }
         if !isEditingLatestRecording {
+            latestRecordingEditError = nil
             editableDescriptor = descriptor
             frozenFinalizedSystem = systemBuffer.snapshot()
             frozenFinalizedMic = micBuffer.snapshot()
@@ -1080,6 +1082,7 @@ final class RecordingManager: @unchecked Sendable {
 
     func cancelLatestRecordingEdit() {
         isEditingLatestRecording = false
+        latestRecordingEditError = nil
         editableDescriptor = nil
         latestRecordingEditRange = nil
         latestRecordingEditVisibleRange = nil
@@ -1099,11 +1102,15 @@ final class RecordingManager: @unchecked Sendable {
               let mic = frozenFinalizedMic,
               let expectedFingerprint = editableFingerprint else { return }
         isApplyingLatestRecordingEdit = true
+        latestRecordingEditError = nil
         defer { isApplyingLatestRecordingEdit = false }
 
         let recording = descriptor.recording
         await transcriptionService.cancelTranscriptionAndWait(for: recording.url)
-        guard Self.fingerprint(for: recording.url) == expectedFingerprint else { return }
+        guard Self.fingerprint(for: recording.url) == expectedFingerprint else {
+            latestRecordingEditError = AudioEditRenderer.RenderError.targetChanged.localizedDescription
+            return
+        }
         let ext = descriptor.format.fileExtension
         let staging = recording.url.deletingLastPathComponent().appendingPathComponent(
             ".\(recording.url.deletingPathExtension().lastPathComponent).ripcord-edit-\(UUID().uuidString).\(ext)"
@@ -1186,6 +1193,7 @@ final class RecordingManager: @unchecked Sendable {
             cancelLatestRecordingEdit()
         } catch {
             try? FileManager.default.removeItem(at: staging)
+            latestRecordingEditError = error.localizedDescription
             logger.error("Could not apply recording edit: \(error.localizedDescription)")
         }
     }
