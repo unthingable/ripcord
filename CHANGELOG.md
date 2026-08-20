@@ -1,5 +1,13 @@
 # Changelog
 
+## [0.13.1] - 2026-08-20
+
+### Added
+  * Show progress while applying recording edits and across the complete transcription job.
+
+### Fixed
+  * Harden editable recording boundary handling and audio edit lifecycle/concurrency.
+
 ## [0.13.0] - 2026-07-25
 
 ### Added
