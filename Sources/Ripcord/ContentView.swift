@@ -330,24 +330,27 @@ struct ContentView: View {
                 // Everything right of handle = captured
                 GeometryReader { geo in
                     let width = geo.size.width
-                    let bufMax = Double(max(1, manager.bufferDurationSeconds))
-                    // While recording/paused, the handle slides left in lockstep with
-                    // recorded elapsed so right-of-handle always reflects total captured
-                    // audio (back-record + recorded so far). captureDurationSeconds itself
-                    // is not mutated — it stays as the user's back-record preference.
-                    let effectiveCapture = isCapturing
-                        ? min(bufMax, Double(manager.captureDurationSeconds) + manager.recordingElapsed)
-                        : Double(manager.captureDurationSeconds)
-                    let captureFraction = effectiveCapture / bufMax
-                    let handleX = width * (1 - captureFraction)
                     let visible = isEditing
                         ? (manager.latestRecordingEditVisibleRange ?? manager.visibleCaptureRange)
                         : manager.visibleCaptureRange
-                    let pausedRange = manager.pausedSelectionRange
+                    let bufMax = Double(max(1, manager.bufferDurationSeconds))
                     let xForFrame: (CaptureFrame) -> CGFloat? = { frame in
                         guard !visible.isEmpty, frame >= visible.start, frame <= visible.end else { return nil }
                         return width * CGFloat(Double(frame - visible.start) / Double(visible.count))
                     }
+                    // Use the same absolute frame boundary as the red selected range.
+                    // Deriving this from recordingElapsed used a separate wall-clock
+                    // timeline and made the handle drift from the waveform.
+                    let captureStartFrame: CaptureFrame? = {
+                        if isCapturing, let start = manager.recordingSelectedRanges.first?.start {
+                            return start
+                        }
+                        guard !visible.isEmpty else { return nil }
+                        let captureFrames = CaptureFrame(manager.captureDurationSeconds * AudioConstants.sampleRateInt)
+                        return max(visible.start, visible.end - captureFrames)
+                    }()
+                    let handleX = captureStartFrame.flatMap(xForFrame)
+                    let pausedRange = manager.pausedSelectionRange
                     let pausedOutX = pausedRange.flatMap { xForFrame($0.start) }
                     let pausedInX = pausedRange.flatMap { xForFrame($0.end) }
                     let editRange = manager.latestRecordingEditRange
@@ -407,7 +410,7 @@ struct ContentView: View {
                                     if isCapturing {
                                         color = .primary.opacity(0.15)
                                     } else {
-                                        let isCaptured = x >= handleX
+                                        let isCaptured = handleX.map { x >= $0 } ?? false
                                         color = isCaptured ? .accentColor : .primary.opacity(0.15)
                                     }
                                 }
@@ -422,9 +425,9 @@ struct ContentView: View {
                             context.fill(Path(roundedRect: rect, cornerRadius: 1), with: .color(color))
                         }
 
-                        // The old capture handle stays put while recording. Paused
-                        // and finalized-edit states use explicit Out/In boundaries.
-                        if !isPaused && !isEditing, handleX >= 0, handleX <= size.width {
+                        // Recording uses the selected capture boundary. Paused and
+                        // finalized-edit states use explicit Out/In boundaries.
+                        if !isPaused && !isEditing, let handleX, handleX >= 0, handleX <= size.width {
                             let handleRect = CGRect(x: handleX - 1, y: 0, width: 2, height: size.height)
                             context.fill(
                                 Path(roundedRect: handleRect, cornerRadius: 1),
