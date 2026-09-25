@@ -139,6 +139,8 @@ struct TranscriptionConfig: Equatable {
 
 @Observable
 final class RecordingManager: @unchecked Sendable {
+    private static let recentRecordingsPageSize = 10
+
     var state: AppState = .starting
     private var initialStartupLaunched = false
     var bufferDurationSeconds: Int = 300
@@ -150,7 +152,11 @@ final class RecordingManager: @unchecked Sendable {
     var nativeMicDebugEnabled: Bool = false
     var channelSplit: Bool = true
     var outputDirectory: URL
-    var recentRecordings: [RecordingInfo] = []  // newest first, capped at 10
+    var recentRecordings: [RecordingInfo] = []  // newest first
+    var hasMoreRecentRecordings = false
+    var isLoadingMoreRecentRecordings = false
+    private var recentRecordingsRequestedCount = recentRecordingsPageSize
+    private var recentRecordingsLoadGeneration = 0
     var recordingElapsed: TimeInterval = 0
     var micStatus: MicStatus = .off
     var systemMicMode: SystemMicMode = .unavailable
@@ -566,7 +572,7 @@ final class RecordingManager: @unchecked Sendable {
         let dir = await MainActor.run { outputDirectory }
         try? FileManager.default.createDirectory(at: dir, withIntermediateDirectories: true)
 
-        await loadRecentRecordings()
+        await loadRecentRecordings(reset: true)
         await MainActor.run {
             transcriptionService.loadPendingSpeakers(in: outputDirectory)
             startDirectoryMonitor()
@@ -590,8 +596,20 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
-    private func loadRecentRecordings() async {
-        let dir = await MainActor.run { outputDirectory }
+    private func loadRecentRecordings(reset: Bool = false) async {
+        let request = await MainActor.run { () -> (URL, Int, Int, [URL: RecordingInfo]) in
+            if reset {
+                recentRecordingsRequestedCount = Self.recentRecordingsPageSize
+            }
+            recentRecordingsLoadGeneration += 1
+            return (
+                outputDirectory,
+                recentRecordingsRequestedCount,
+                recentRecordingsLoadGeneration,
+                Dictionary(uniqueKeysWithValues: recentRecordings.map { ($0.url, $0) })
+            )
+        }
+        let (dir, requestedCount, generation, existingByURL) = request
         let fm = FileManager.default
         guard let files = try? fm.contentsOfDirectory(
             at: dir,
@@ -600,20 +618,41 @@ final class RecordingManager: @unchecked Sendable {
         ) else { return }
 
         let audioExtensions: Set<String> = ["wav", "m4a"]
-        let recordings: [(RecordingInfo, Date)] = files
+        let recordings: [(url: URL, size: UInt64, created: Date)] = files
             .filter { audioExtensions.contains($0.pathExtension.lowercased()) }
             .compactMap { url in
                 guard let attrs = try? fm.attributesOfItem(atPath: url.path),
                       let size = attrs[.size] as? UInt64,
                       let created = attrs[.creationDate] as? Date else { return nil }
-                let duration = Self.audioDuration(url: url) ?? 0
-                return (RecordingInfo(url: url, duration: duration, fileSize: size), created)
+                return (url, size, created)
             }
-            .sorted { $0.1 > $1.1 }
-        let loaded = Array(recordings.prefix(10).map { $0.0 })
+            .sorted { $0.created > $1.created }
+        let loaded = recordings.prefix(requestedCount).map { candidate in
+            if let existing = existingByURL[candidate.url], existing.fileSize == candidate.size {
+                return existing
+            }
+            let duration = Self.audioDuration(url: candidate.url) ?? 0
+            return RecordingInfo(url: candidate.url, duration: duration, fileSize: candidate.size)
+        }
 
         await MainActor.run {
-            recentRecordings = loaded
+            guard outputDirectory == dir, recentRecordingsLoadGeneration == generation else { return }
+            recentRecordings = Array(loaded)
+            hasMoreRecentRecordings = recordings.count > loaded.count
+        }
+    }
+
+    func loadMoreRecentRecordings() async {
+        let shouldLoad = await MainActor.run { () -> Bool in
+            guard hasMoreRecentRecordings, !isLoadingMoreRecentRecordings else { return false }
+            isLoadingMoreRecentRecordings = true
+            recentRecordingsRequestedCount += Self.recentRecordingsPageSize
+            return true
+        }
+        guard shouldLoad else { return }
+        await loadRecentRecordings()
+        await MainActor.run {
+            isLoadingMoreRecentRecordings = false
         }
     }
 
@@ -940,7 +979,6 @@ final class RecordingManager: @unchecked Sendable {
             logger.error("Recording stopped: \(info.url.lastPathComponent) (\(info.formattedDuration), \(info.formattedSize))")
             recentRecordings.removeAll { $0.url == info.url }
             recentRecordings.insert(info, at: 0)
-            if recentRecordings.count > 10 { recentRecordings.removeLast() }
             UserDefaults.standard.set(true, forKey: SettingsKey.hasRecordedBefore)
             if let fingerprint = Self.fingerprint(for: info.url) {
                 latestFinalizedDescriptor = FinalizedRecordingDescriptor(
@@ -1205,7 +1243,6 @@ final class RecordingManager: @unchecked Sendable {
             updated.url = recording.url
             recentRecordings.removeAll { $0.url == recording.url }
             recentRecordings.insert(updated, at: 0)
-            if recentRecordings.count > 10 { recentRecordings.removeLast() }
             let newRanges = RecordingSelectionTimeline.coalesced(
                 descriptor.spans.compactMap { span -> CaptureFrameRange? in
                     let start = max(range.start, span.source.start)
@@ -1267,7 +1304,7 @@ final class RecordingManager: @unchecked Sendable {
         transcriptionService.speakerProfileStore = speakerProfileStore
         transcriptionService.loadPendingSpeakers(in: url)
         startDirectoryMonitor()
-        Task { await loadRecentRecordings() }
+        Task { await loadRecentRecordings(reset: true) }
     }
 
     func updatePostRecordingTranscriptionMode(_ mode: PostRecordingTranscriptionMode) {
@@ -1371,7 +1408,6 @@ final class RecordingManager: @unchecked Sendable {
         let duration = Self.audioDuration(url: url) ?? 0
         let info = RecordingInfo(url: url, duration: duration, fileSize: size)
         recentRecordings.insert(info, at: 0)
-        if recentRecordings.count > 10 { recentRecordings.removeLast() }
         transcribeRecording(info, config: config, overwrite: overwrite)
     }
 

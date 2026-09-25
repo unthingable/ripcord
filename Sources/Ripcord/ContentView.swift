@@ -1074,9 +1074,25 @@ struct ContentView: View {
                 .font(.caption)
 
             ScrollView {
-                VStack(alignment: .leading, spacing: 6) {
+                LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(manager.recentRecordings, id: \.url) { recording in
                         recordingRow(recording)
+                    }
+                    if manager.hasMoreRecentRecordings {
+                        HStack(spacing: 6) {
+                            ProgressView()
+                                .controlSize(.small)
+                                .transaction { $0.disablesAnimations = false }
+                            Text("Loading more…")
+                                .font(.caption2)
+                                .foregroundStyle(.secondary)
+                        }
+                        .frame(maxWidth: .infinity)
+                        .padding(.vertical, 4)
+                        .id(manager.recentRecordings.count)
+                        .onAppear {
+                            Task { await manager.loadMoreRecentRecordings() }
+                        }
                     }
                 }
             }
