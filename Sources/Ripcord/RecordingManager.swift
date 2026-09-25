@@ -16,6 +16,28 @@ enum AppState: Equatable {
     case error(String)
 }
 
+enum PostRecordingTranscriptionMode: String, CaseIterable {
+    case none
+    case prompt
+    case automatic
+
+    var label: String {
+        switch self {
+        case .none: "Off"
+        case .prompt: "Ask"
+        case .automatic: "Auto"
+        }
+    }
+
+    var helpText: String {
+        switch self {
+        case .none: "Don't transcribe after recording"
+        case .prompt: "Show the transcription popover after recording"
+        case .automatic: "Transcribe using saved defaults after recording"
+        }
+    }
+}
+
 enum MicStatus: Equatable {
     case off
     case permissionDenied
@@ -85,6 +107,7 @@ enum SettingsKey {
     static let mainPanelRecentsHeight = "ripcord.mainPanelRecentsHeight"
     static let micLatencySettings = "ripcord.micLatencySettings"
     static let pendingMicRestoreUID = "ripcord.pendingMicRestoreUID"
+    static let postRecordingTranscriptionMode = "ripcord.postRecordingTranscriptionMode"
 }
 
 enum SpeakerSensitivity: String, CaseIterable {
@@ -161,7 +184,8 @@ final class RecordingManager: @unchecked Sendable {
     private var pendingMicRestoreUID: String?
     var micLatencyEstimate: AudioLatencyEstimate?
     private var micLatencySettingsByUID: [String: MicLatencySettings] = [:]
-    var transcriptionEnabled: Bool = false
+    var postRecordingTranscriptionMode: PostRecordingTranscriptionMode = .none
+    private(set) var pendingPostRecordingTranscription: RecordingInfo?
     var transcriptionConfig: TranscriptionConfig = TranscriptionConfig()
     var silenceAutoPauseEnabled: Bool = false
     var silenceThreshold: Float = 0.01
@@ -348,7 +372,15 @@ final class RecordingManager: @unchecked Sendable {
         selectedMicUID = defaults.string(forKey: SettingsKey.selectedMicUID)
         pendingMicRestoreUID = defaults.string(forKey: SettingsKey.pendingMicRestoreUID)
         micLatencySettingsByUID = micLatencyStore.allSettings()
-        transcriptionEnabled = defaults.bool(forKey: SettingsKey.enableTranscription)
+        if let rawMode = defaults.string(forKey: SettingsKey.postRecordingTranscriptionMode),
+           let mode = PostRecordingTranscriptionMode(rawValue: rawMode) {
+            postRecordingTranscriptionMode = mode
+        } else if defaults.object(forKey: SettingsKey.enableTranscription) != nil {
+            // Preserve the old boolean setting for existing installations.
+            postRecordingTranscriptionMode = defaults.bool(forKey: SettingsKey.enableTranscription)
+                ? .automatic
+                : .none
+        }
 
         // Load silence auto-pause settings
         if defaults.object(forKey: SettingsKey.silenceAutoPauseEnabled) != nil {
@@ -924,8 +956,15 @@ final class RecordingManager: @unchecked Sendable {
                 latestFinalizedDescriptor = nil
             }
             state = .buffering
-            if transcriptionEnabled && transcriptionService.modelsReady && !skipAutomaticTranscription {
-                transcribeRecording(info)
+            if transcriptionService.modelsReady && !skipAutomaticTranscription {
+                switch postRecordingTranscriptionMode {
+                case .none:
+                    break
+                case .prompt:
+                    pendingPostRecordingTranscription = info
+                case .automatic:
+                    transcribeRecording(info)
+                }
             }
         case .failure(let error):
             logger.error("Recording failed: \(error.localizedDescription)")
@@ -1231,9 +1270,15 @@ final class RecordingManager: @unchecked Sendable {
         Task { await loadRecentRecordings() }
     }
 
-    func updateTranscriptionEnabled(_ enabled: Bool) {
-        transcriptionEnabled = enabled
-        UserDefaults.standard.set(enabled, forKey: SettingsKey.enableTranscription)
+    func updatePostRecordingTranscriptionMode(_ mode: PostRecordingTranscriptionMode) {
+        postRecordingTranscriptionMode = mode
+        UserDefaults.standard.set(mode.rawValue, forKey: SettingsKey.postRecordingTranscriptionMode)
+    }
+
+    func consumePendingPostRecordingTranscription() -> RecordingInfo? {
+        let target = pendingPostRecordingTranscription
+        pendingPostRecordingTranscription = nil
+        return target
     }
 
     func updateSilenceAutoPause(enabled: Bool) {
@@ -1266,10 +1311,14 @@ final class RecordingManager: @unchecked Sendable {
     func downloadTranscriptionModels() {
         Task {
             await transcriptionService.prepareModels(config: transcriptionConfig)
-            // Auto-enable transcription on first successful download
+            // Default to automatic transcription after the first successful
+            // download when no transcription preference exists yet.
             await MainActor.run {
-                if transcriptionService.modelsReady && !transcriptionEnabled {
-                    updateTranscriptionEnabled(true)
+                let defaults = UserDefaults.standard
+                let hasSavedMode = defaults.object(forKey: SettingsKey.postRecordingTranscriptionMode) != nil
+                    || defaults.object(forKey: SettingsKey.enableTranscription) != nil
+                if transcriptionService.modelsReady && !hasSavedMode {
+                    updatePostRecordingTranscriptionMode(.automatic)
                 }
             }
         }

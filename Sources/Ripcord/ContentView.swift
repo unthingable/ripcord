@@ -11,10 +11,12 @@ struct ContentView: View {
     @Bindable var manager: RecordingManager
 
     @State private var transcribeTarget: RecordingInfo?
+    @State private var postRecordingTranscriptionTarget: RecordingInfo?
     @State private var pendingTranscriptionConfig = TranscriptionConfig()
     @Environment(\.openSettings) private var openSettings
     @Environment(\.openWindow) private var openWindow
     @State private var showFileTranscribePopover = false
+    @State private var showPostRecordingTranscriptionPopover = false
     @State private var fileTranscribeURL: URL?
     @State private var renamingURL: URL?
     @State private var renameText: String = ""
@@ -45,6 +47,17 @@ struct ContentView: View {
                 setupGlobalHotkey()
                 manager.refreshSystemMicMode()
             }
+            .onChange(of: manager.pendingPostRecordingTranscription?.url) { _, newURL in
+                guard newURL != nil,
+                      let target = manager.consumePendingPostRecordingTranscription() else { return }
+                presentPostRecordingTranscription(for: target)
+            }
+            .onChange(of: showPostRecordingTranscriptionPopover) { _, showing in
+                if !showing {
+                    postRecordingTranscriptionTarget = nil
+                    pinMenuBarWindow(false)
+                }
+            }
     }
 
     @ViewBuilder
@@ -68,6 +81,18 @@ struct ContentView: View {
 
             // Record / Stop button
             recordButton
+                .instantPopover(
+                    isPresented: $showPostRecordingTranscriptionPopover,
+                    arrowEdge: .bottom
+                ) {
+                    TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
+                        guard let target = postRecordingTranscriptionTarget else { return }
+                        showPostRecordingTranscriptionPopover = false
+                        manager.transcribeRecording(target, config: pendingTranscriptionConfig)
+                    } onCancel: {
+                        showPostRecordingTranscriptionPopover = false
+                    }
+                }
 
             Divider()
 
@@ -206,6 +231,14 @@ struct ContentView: View {
     private func pinMenuBarWindow(_ pin: Bool) {
         guard let w = menuBarWindow else { return }
         w.hidesOnDeactivate = !pin
+    }
+
+    private func presentPostRecordingTranscription(for target: RecordingInfo) {
+        postRecordingTranscriptionTarget = target
+        pendingTranscriptionConfig = manager.transcriptionConfig
+        pinMenuBarWindow(true)
+        menuBarWindow?.makeKeyAndOrderFront(nil)
+        showPostRecordingTranscriptionPopover = true
     }
 
     // MARK: - Status

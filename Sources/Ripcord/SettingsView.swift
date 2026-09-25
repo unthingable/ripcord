@@ -330,10 +330,16 @@ struct SettingsView: View {
                 }
             }
 
-            Toggle("Transcribe recordings", isOn: Binding(
-                get: { manager.transcriptionEnabled },
-                set: { manager.updateTranscriptionEnabled($0) }
-            ))
+            Picker("Auto transcribe", selection: Binding(
+                get: { manager.postRecordingTranscriptionMode },
+                set: { manager.updatePostRecordingTranscriptionMode($0) }
+            )) {
+                ForEach(PostRecordingTranscriptionMode.allCases, id: \.self) { mode in
+                    Text(mode.label).tag(mode)
+                        .help(mode.helpText)
+                }
+            }
+            .pickerStyle(.segmented)
 
             Picker("Language Model", selection: manager.transcriptionConfigBinding(\.asrModelVersion)) {
                 Text("Multilingual (v3)").tag(ModelVersion.v3)
