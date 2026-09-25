@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.0] - 2026-09-25
+
+### Added
+  * Choose whether to skip, configure, or automatically start transcription after recording.
+  * Load more recent recordings as needed instead of limiting the list to the first ten.
+  * Blur recent-recording filenames for privacy while presenting or sharing the app.
+
+### Fixed
+  * Keep waveform capture handles aligned after recording begins.
+
 ## [0.13.1] - 2026-08-20
 
 ### Added
