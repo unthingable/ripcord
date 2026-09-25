@@ -20,6 +20,7 @@ struct ContentView: View {
     @State private var fileTranscribeURL: URL?
     @State private var renamingURL: URL?
     @State private var renameText: String = ""
+    @State private var filenamesBlurredForPrivacy = false
     @AppStorage(SettingsKey.mainPanelRecentsHeight) private var recentsHeight: Double = 160
     @State private var dragStartHeight: Double?
     @State private var resizeHovering = false
@@ -1070,13 +1071,32 @@ struct ContentView: View {
     @ViewBuilder
     private var recentRecordingsSection: some View {
         VStack(alignment: .leading, spacing: 4) {
-            Text("Recent Recordings")
-                .font(.caption)
+            HStack {
+                Text("Recent Recordings")
+                    .font(.caption)
+                Spacer()
+                Button {
+                    filenamesBlurredForPrivacy.toggle()
+                    if filenamesBlurredForPrivacy {
+                        renamingURL = nil
+                    }
+                } label: {
+                    Image(systemName: filenamesBlurredForPrivacy ? "eye.slash.fill" : "eye")
+                        .font(.caption)
+                        .frame(width: 24, height: 20)
+                        .contentShape(Rectangle())
+                }
+                .buttonStyle(.plain)
+                .foregroundStyle(filenamesBlurredForPrivacy ? Color.accentColor : .secondary)
+                .background(Capsule().fill(Color.accentColor.opacity(filenamesBlurredForPrivacy ? 0.18 : 0)))
+                .accessibilityLabel(filenamesBlurredForPrivacy ? "Show filenames" : "Blur filenames for demos")
+                .help(filenamesBlurredForPrivacy ? "Show filenames" : "Blur filenames for demos")
+            }
 
             ScrollView {
                 LazyVStack(alignment: .leading, spacing: 6) {
                     ForEach(manager.recentRecordings, id: \.url) { recording in
-                        recordingRow(recording)
+                        recordingRow(recording, filenamesBlurred: filenamesBlurredForPrivacy)
                     }
                     if manager.hasMoreRecentRecordings {
                         HStack(spacing: 6) {
@@ -1133,9 +1153,10 @@ struct ContentView: View {
     }
 
     @ViewBuilder
-    private func recordingRow(_ recording: RecordingInfo) -> some View {
+    private func recordingRow(_ recording: RecordingInfo, filenamesBlurred: Bool) -> some View {
         RecordingRowView(
             recording: recording,
+            filenamesBlurred: filenamesBlurred,
             manager: manager,
             renamingURL: $renamingURL,
             renameText: $renameText,
@@ -1230,6 +1251,7 @@ private struct ConfigSummaryMenu<Items: View>: View {
 
 private struct RecordingRowView: View {
     let recording: RecordingInfo
+    let filenamesBlurred: Bool
     let manager: RecordingManager
     @Binding var renamingURL: URL?
     @Binding var renameText: String
@@ -1242,7 +1264,7 @@ private struct RecordingRowView: View {
 
     var body: some View {
         HStack {
-            if renamingURL == recording.url {
+            if renamingURL == recording.url && !filenamesBlurred {
                 let stem = recording.url.deletingPathExtension().lastPathComponent
                 let (base, _) = RecordingManager.parseFilenameParts(stem)
                 HStack {
@@ -1282,6 +1304,7 @@ private struct RecordingRowView: View {
                             Text(recording.filename)
                                 .font(.caption)
                                 .lineLimit(1)
+                                .blur(radius: filenamesBlurred ? 7 : 0, opaque: true)
                             Text("\(recording.formattedDuration) - \(recording.formattedSize)")
                                 .font(.caption2)
                         }
@@ -1323,13 +1346,15 @@ private struct RecordingRowView: View {
                 }
 
                 HStack(spacing: 6) {
-                    Button(action: startRenaming) {
-                        Image(systemName: "pencil")
-                            .font(.body)
-                            .foregroundStyle(.secondary)
+                    if !filenamesBlurred {
+                        Button(action: startRenaming) {
+                            Image(systemName: "pencil")
+                                .font(.body)
+                                .foregroundStyle(.secondary)
+                        }
+                        .buttonStyle(.plain)
+                        .help("Rename")
                     }
-                    .buttonStyle(.plain)
-                    .help("Rename")
 
                     if manager.transcriptionService.transcribingURL == recording.url {
                         TranscriptionProgressIndicator(
@@ -1373,7 +1398,9 @@ private struct RecordingRowView: View {
         )
         .onHover { isHovered = $0 }
         .contextMenu {
-            Button("Rename\u{2026}", action: startRenaming)
+            if !filenamesBlurred {
+                Button("Rename\u{2026}", action: startRenaming)
+            }
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([recording.url])
             }
