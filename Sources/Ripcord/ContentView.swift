@@ -194,9 +194,30 @@ struct ContentView: View {
     }
 
     private var menuBarWindow: NSWindow? {
-        NSApp.windows.first {
+        let windows = NSApp.windows.filter {
             String(describing: type(of: $0)).contains("MenuBarExtraWindow")
         }
+
+        guard !windows.isEmpty else { return nil }
+
+        // MenuBarExtra creates one panel per display. The order of NSApp.windows
+        // is not stable, so choosing the first one can present the UI offscreen
+        // on another monitor. Prefer the active panel, then the panel on the
+        // display where the user is currently interacting.
+        if let keyWindow = NSApp.keyWindow,
+           windows.contains(where: { $0 === keyWindow }) {
+            return keyWindow
+        }
+
+        let mouseLocation = NSEvent.mouseLocation
+        if let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }),
+           let matchingWindow = windows.first(where: {
+               $0.isVisible && $0.screen?.frame == mouseScreen.frame
+           }) {
+            return matchingWindow
+        }
+
+        return windows.first(where: { $0.isVisible }) ?? windows.first
     }
 
     /// Open the Settings window and bring it above the MenuBarExtra panel.
