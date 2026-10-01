@@ -393,18 +393,36 @@ struct ContentView: View {
                         guard !visible.isEmpty, frame >= visible.start, frame <= visible.end else { return nil }
                         return width * CGFloat(Double(frame - visible.start) / Double(visible.count))
                     }
-                    // Use the same absolute frame boundary as the red selected range.
-                    // Deriving this from recordingElapsed used a separate wall-clock
-                    // timeline and made the handle drift from the waveform.
-                    let captureStartFrame: CaptureFrame? = {
-                        if isCapturing, let start = manager.recordingSelectedRanges.first?.start {
-                            return start
-                        }
+                    // While recording, use the same absolute frame boundary as the
+                    // red selected range. Deriving it from recordingElapsed used a
+                    // separate wall-clock timeline and made the handle drift.
+                    let handleX: CGFloat? = { () -> CGFloat? in
                         guard !visible.isEmpty else { return nil }
-                        let captureFrames = CaptureFrame(manager.captureDurationSeconds * AudioConstants.sampleRateInt)
-                        return max(visible.start, visible.end - captureFrames)
+
+                        if isCapturing {
+                            // During recording, keep the handle tied to the absolute
+                            // selection boundary. Once the rolling window advances
+                            // past that boundary, pin it to the left edge instead of
+                            // letting the handle disappear.
+                            let captureFrames = CaptureFrame(
+                                manager.captureDurationSeconds * AudioConstants.sampleRateInt
+                            )
+                            let start = manager.recordingSelectedRanges.first?.start
+                                ?? visible.end - captureFrames
+                            return xForFrame(min(visible.end, max(visible.start, start)))
+                        }
+
+                        // While buffering, the drag gesture maps directly to the
+                        // configured buffer duration. Use that same scale for the
+                        // drawn handle; mapping through the shorter currently-filled
+                        // window made the handle appear stuck at the left edge until
+                        // the buffer filled completely.
+                        let fraction = min(
+                            1,
+                            Double(max(0, manager.captureDurationSeconds)) / bufMax
+                        )
+                        return width * CGFloat(1 - fraction)
                     }()
-                    let handleX = captureStartFrame.flatMap(xForFrame)
                     let pausedRange = manager.pausedSelectionRange
                     let pausedOutX = pausedRange.flatMap { xForFrame($0.start) }
                     let pausedInX = pausedRange.flatMap { xForFrame($0.end) }
