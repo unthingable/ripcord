@@ -3,6 +3,10 @@ import SwiftUI
 import TranscribeKit
 import UniformTypeIdentifiers
 
+private final class WeakWindowReference {
+    weak var window: NSWindow?
+}
+
 struct ContentView: View {
     private enum WaveformDragHandle {
         case capture, pausedOut, pausedIn, editStart, editEnd
@@ -18,6 +22,8 @@ struct ContentView: View {
     @State private var showFileTranscribePopover = false
     @State private var showPostRecordingTranscriptionPopover = false
     @State private var fileTranscribeURL: URL?
+    @State private var menuBarWindowReference = WeakWindowReference()
+    @State private var postRecordingPromptHostID = UUID()
     @State private var renamingURL: URL?
     @State private var renameText: String = ""
     @State private var filenamesBlurredForPrivacy = false
@@ -50,13 +56,29 @@ struct ContentView: View {
             }
             .onChange(of: manager.pendingPostRecordingTranscription?.url) { _, newURL in
                 guard newURL != nil,
-                      let target = manager.consumePendingPostRecordingTranscription() else { return }
+                      let target = manager.consumePendingPostRecordingTranscription(
+                        for: postRecordingPromptHostID
+                      ) else { return }
                 presentPostRecordingTranscription(for: target)
+            }
+            .onChange(of: manager.postRecordingTranscriptionPromptRequested) { _, requested in
+                guard requested,
+                      manager.claimPostRecordingTranscriptionPrompt(for: postRecordingPromptHostID) else {
+                    return
+                }
+                presentPostRecordingTranscription()
+            }
+            .onChange(of: manager.state) { _, state in
+                guard state == .recording else { return }
+                postRecordingTranscriptionTarget = nil
+                if showPostRecordingTranscriptionPopover {
+                    showPostRecordingTranscriptionPopover = false
+                }
             }
             .onChange(of: showPostRecordingTranscriptionPopover) { _, showing in
                 if !showing {
                     postRecordingTranscriptionTarget = nil
-                    pinMenuBarWindow(false)
+                    manager.cancelPendingPostRecordingTranscription()
                 }
             }
     }
@@ -70,7 +92,9 @@ struct ContentView: View {
             // Capture duration scrubber with level meters
             if manager.state == .buffering || manager.state == .recording || manager.state == .paused {
                 captureSlider
-                    .allowsHitTesting(!manager.isApplyingLatestRecordingEdit)
+                    .allowsHitTesting(
+                        !manager.isApplyingLatestRecordingEdit && !manager.isFinalizingRecording
+                    )
                     .onAppear { manager.startWaveformTimer() }
                     .onDisappear { manager.stopWaveformTimer() }
             }
@@ -80,19 +104,28 @@ struct ContentView: View {
                 nameField
             }
 
-            // Record / Stop button
-            recordButton
+            // Record / Stop button. Keep the popover anchor outside the
+            // state-dependent button so saving completion does not destroy and
+            // recreate the anchored popover.
+            recordButtonAnchor
                 .instantPopover(
                     isPresented: $showPostRecordingTranscriptionPopover,
-                    arrowEdge: .bottom
+                    arrowEdge: .bottom,
+                    onWindow: captureMenuBarWindow
                 ) {
-                    TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
-                        guard let target = postRecordingTranscriptionTarget else { return }
-                        showPostRecordingTranscriptionPopover = false
-                        manager.transcribeRecording(target, config: pendingTranscriptionConfig)
-                    } onCancel: {
-                        showPostRecordingTranscriptionPopover = false
-                    }
+                    TranscriptionConfigPopover(
+                        config: $pendingTranscriptionConfig,
+                        onTranscribe: {
+                            guard let target = postRecordingTranscriptionTarget else { return }
+                            showPostRecordingTranscriptionPopover = false
+                            manager.transcribeRecording(target, config: pendingTranscriptionConfig)
+                        },
+                        onCancel: {
+                            showPostRecordingTranscriptionPopover = false
+                        },
+                        isTranscribeDisabled: postRecordingTranscriptionTarget == nil,
+                        message: manager.postRecordingTranscriptionError
+                    )
                 }
 
             Divider()
@@ -120,8 +153,6 @@ struct ContentView: View {
                         panel.allowsMultipleSelection = false
                         panel.begin { response in
                             guard response == .OK, let url = panel.url else { return }
-                            pinMenuBarWindow(true)
-                            menuBarWindow?.makeKeyAndOrderFront(nil)
                             fileTranscribeURL = url
                             pendingTranscriptionConfig = manager.transcriptionConfig
                             showFileTranscribePopover = true
@@ -129,7 +160,11 @@ struct ContentView: View {
                     }
                     .font(.caption)
                     .disabled(manager.transcriptionService.isTranscribing)
-                    .instantPopover(isPresented: $showFileTranscribePopover, arrowEdge: .top) {
+                    .instantPopover(
+                        isPresented: $showFileTranscribePopover,
+                        arrowEdge: .top,
+                        onWindow: captureMenuBarWindow
+                    ) {
                         TranscriptionConfigPopover(config: $pendingTranscriptionConfig) {
                             showFileTranscribePopover = false
                             if let url = fileTranscribeURL {
@@ -140,9 +175,6 @@ struct ContentView: View {
                             showFileTranscribePopover = false
                             fileTranscribeURL = nil
                         }
-                    }
-                    .onChange(of: showFileTranscribePopover) { _, showing in
-                        if !showing { pinMenuBarWindow(false) }
                     }
                 } else if case .loadingModels = manager.transcriptionService.state {
                     HStack(spacing: 4) {
@@ -193,22 +225,28 @@ struct ContentView: View {
         }
     }
 
-    private var menuBarWindow: NSWindow? {
-        let windows = NSApp.windows.filter {
+    private var menuBarWindows: [NSWindow] {
+        NSApp.windows.filter {
             String(describing: type(of: $0)).contains("MenuBarExtraWindow")
         }
+    }
+
+    private var menuBarWindow: NSWindow? {
+        let windows = menuBarWindows
 
         guard !windows.isEmpty else { return nil }
 
-        // MenuBarExtra creates one panel per display. The order of NSApp.windows
-        // is not stable, so choosing the first one can present the UI offscreen
-        // on another monitor. Prefer the active panel, then the panel on the
-        // display where the user is currently interacting.
-        if let keyWindow = NSApp.keyWindow,
-           windows.contains(where: { $0 === keyWindow }) {
-            return keyWindow
+        // Popover presenters capture the exact MenuBarExtra window that hosts
+        // their anchor. Reuse it instead of guessing from the global window list.
+        if let captured = menuBarWindowReference.window,
+           windows.contains(where: { $0 === captured }),
+           (captured.isVisible || captured.isKeyWindow) {
+            return captured
         }
 
+        // MenuBarExtra creates one panel per display. If no anchor is captured,
+        // use the display where the user is interacting before falling back to
+        // the key window; NSApp.windows order is not stable across displays.
         let mouseLocation = NSEvent.mouseLocation
         if let mouseScreen = NSScreen.screens.first(where: { $0.frame.contains(mouseLocation) }),
            let matchingWindow = windows.first(where: {
@@ -217,7 +255,17 @@ struct ContentView: View {
             return matchingWindow
         }
 
+        if let keyWindow = NSApp.keyWindow,
+           windows.contains(where: { $0 === keyWindow }), keyWindow.isVisible {
+            return keyWindow
+        }
+
         return windows.first(where: { $0.isVisible }) ?? windows.first
+    }
+
+    private func captureMenuBarWindow(_ window: NSWindow) {
+        guard String(describing: type(of: window)).contains("MenuBarExtraWindow") else { return }
+        menuBarWindowReference.window = window
     }
 
     /// Open the Settings window and bring it above the MenuBarExtra panel.
@@ -249,17 +297,15 @@ struct ContentView: View {
         }
     }
 
-    /// Pin/unpin the MenuBarExtra window so it doesn't dismiss on focus loss.
-    private func pinMenuBarWindow(_ pin: Bool) {
-        guard let w = menuBarWindow else { return }
-        w.hidesOnDeactivate = !pin
-    }
-
-    private func presentPostRecordingTranscription(for target: RecordingInfo) {
-        postRecordingTranscriptionTarget = target
-        pendingTranscriptionConfig = manager.transcriptionConfig
-        pinMenuBarWindow(true)
-        menuBarWindow?.makeKeyAndOrderFront(nil)
+    private func presentPostRecordingTranscription(for target: RecordingInfo? = nil) {
+        if let target {
+            postRecordingTranscriptionTarget = target
+        } else {
+            postRecordingTranscriptionTarget = nil
+        }
+        if !showPostRecordingTranscriptionPopover {
+            pendingTranscriptionConfig = manager.transcriptionConfig
+        }
         showPostRecordingTranscriptionPopover = true
     }
 
@@ -388,16 +434,32 @@ struct ContentView: View {
                     let visible = isEditing
                         ? (manager.latestRecordingEditVisibleRange ?? manager.visibleCaptureRange)
                         : manager.visibleCaptureRange
+                    // The waveform tracker always represents the configured
+                    // buffer as 100 time bins. Keep the display on that same
+                    // timeline, including the blank prefix while the buffer is
+                    // still filling, so handles and selection colors cannot
+                    // drift relative to the bars.
+                    let displayRange: CaptureFrameRange = {
+                        guard !visible.isEmpty else { return visible }
+                        let displayFrames = CaptureFrame(
+                            max(1, manager.bufferDurationSeconds) * AudioConstants.sampleRateInt
+                        )
+                        return CaptureFrameRange(visible.end - displayFrames, visible.end)
+                    }()
                     let bufMax = Double(max(1, manager.bufferDurationSeconds))
                     let xForFrame: (CaptureFrame) -> CGFloat? = { frame in
-                        guard !visible.isEmpty, frame >= visible.start, frame <= visible.end else { return nil }
-                        return width * CGFloat(Double(frame - visible.start) / Double(visible.count))
+                        guard !displayRange.isEmpty,
+                              frame >= displayRange.start,
+                              frame <= displayRange.end else { return nil }
+                        return width * CGFloat(
+                            Double(frame - displayRange.start) / Double(displayRange.count)
+                        )
                     }
                     // While recording, use the same absolute frame boundary as the
                     // red selected range. Deriving it from recordingElapsed used a
                     // separate wall-clock timeline and made the handle drift.
                     let handleX: CGFloat? = { () -> CGFloat? in
-                        guard !visible.isEmpty else { return nil }
+                        guard !displayRange.isEmpty else { return nil }
 
                         if isCapturing {
                             // During recording, keep the handle tied to the absolute
@@ -409,7 +471,7 @@ struct ContentView: View {
                             )
                             let start = manager.recordingSelectedRanges.first?.start
                                 ?? visible.end - captureFrames
-                            return xForFrame(min(visible.end, max(visible.start, start)))
+                            return xForFrame(min(displayRange.end, max(displayRange.start, start)))
                         }
 
                         // While buffering, the drag gesture maps directly to the
@@ -442,12 +504,11 @@ struct ContentView: View {
                     let selectedRanges = manager.recordingSelectedRanges
 
                     Canvas { context, size in
-                        let barWidth: CGFloat = 2
-                        let gap: CGFloat = 1
-                        let step = barWidth + gap
+                        let totalBars = 100
+                        let step = size.width / CGFloat(totalBars)
+                        let barWidth = min(2, max(1, step * 0.7))
                         let midY = size.height / 2
 
-                        let totalBars = max(1, Int(size.width / step))
                         let filledBars = min(totalBars, displayedFilledBarCount)
                         let startBar = totalBars - filledBars
 
@@ -456,8 +517,9 @@ struct ContentView: View {
                             let amp = CGFloat(amps[100 - filledBars + i])
                             let barHeight = max(2, amp * size.height * 0.9)
                             let barState = states[100 - filledBars + i]
-                            let frame = visible.start + CaptureFrame(
-                                Double(visible.count) * Double((x + barWidth / 2) / max(1, size.width))
+                            let frame = displayRange.start + CaptureFrame(
+                                Double(displayRange.count)
+                                    * Double((x + barWidth / 2) / max(1, size.width))
                             )
                             let isSelected = selectedRanges.contains {
                                 frame >= $0.start && frame < $0.end
@@ -528,8 +590,8 @@ struct ContentView: View {
                         DragGesture(minimumDistance: 0)
                             .onChanged { value in
                                 let fraction = max(0, min(1, value.location.x / width))
-                                let frame = visible.start
-                                    + CaptureFrame((Double(visible.count) * fraction).rounded())
+                                let frame = displayRange.start
+                                    + CaptureFrame((Double(displayRange.count) * fraction).rounded())
                                 if waveformDragHandle == nil {
                                     if isPaused {
                                         let selection = pausedRange
@@ -550,7 +612,7 @@ struct ContentView: View {
                                     } else if !isRecording,
                                               let candidateRange = manager.latestRecordingBoundaryRange {
                                         let tolerance = CaptureFrame(
-                                            Double(max(1, visible.count)) * 12 / Double(max(1, width))
+                                            Double(max(1, displayRange.count)) * 12 / Double(max(1, width))
                                         )
                                         let startDistance = abs(frame - candidateRange.start)
                                         let endDistance = abs(frame - candidateRange.end)
@@ -702,7 +764,7 @@ struct ContentView: View {
                 .controlSize(.large)
                 .keyboardShortcut("p", modifiers: [])
 
-                Button(action: { manager.stopRecording() }) {
+                Button(action: { manager.stopRecording(promptHostID: postRecordingPromptHostID) }) {
                     Label("Stop Recording", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -718,7 +780,7 @@ struct ContentView: View {
                 .controlSize(.large)
                 .keyboardShortcut("p", modifiers: [])
 
-                Button(action: { manager.stopRecording() }) {
+                Button(action: { manager.stopRecording(promptHostID: postRecordingPromptHostID) }) {
                     Label("Stop Recording", systemImage: "stop.fill")
                         .frame(maxWidth: .infinity)
                 }
@@ -726,7 +788,12 @@ struct ContentView: View {
                 .keyboardShortcut(".", modifiers: [.command])
             }
         } else if manager.state == .buffering {
-            if manager.isEditingLatestRecording {
+            if manager.isFinalizingRecording {
+                Text("Saving recording…")
+                    .frame(maxWidth: .infinity)
+                    .foregroundStyle(.secondary)
+                    .controlSize(.large)
+            } else if manager.isEditingLatestRecording {
                 VStack(alignment: .leading, spacing: 4) {
                     if manager.isApplyingLatestRecordingEdit {
                         Text("Saving changes…")
@@ -776,6 +843,13 @@ struct ContentView: View {
                 }
             }
         }
+    }
+
+    private var recordButtonAnchor: some View {
+        ZStack {
+            recordButton
+        }
+        .frame(maxWidth: .infinity, minHeight: 32)
     }
 
     // MARK: - Config Summary
@@ -853,7 +927,11 @@ struct ContentView: View {
             }
         }
         .font(.system(size: 10))
-        .disabled(manager.state == .recording || manager.state == .paused)
+        .disabled(
+            manager.state == .recording
+                || manager.state == .paused
+                || manager.isFinalizingRecording
+        )
     }
 
     @ViewBuilder
@@ -1324,6 +1402,7 @@ private struct RecordingRowView: View {
                             .padding(.vertical, 2)
                             .background(RoundedRectangle(cornerRadius: 4).fill(Color(nsColor: .textBackgroundColor)))
                             .overlay(RoundedRectangle(cornerRadius: 4).stroke(.secondary.opacity(0.3)))
+                            .disabled(manager.transcriptionService.isTranscribing)
                             .focused($renameFieldFocused)
                             .onExitCommand { renamingURL = nil }
                         }
@@ -1392,6 +1471,7 @@ private struct RecordingRowView: View {
                                 .foregroundStyle(.secondary)
                         }
                         .buttonStyle(.plain)
+                        .disabled(manager.transcriptionService.isTranscribing)
                         .help("Rename")
                     }
 
@@ -1439,6 +1519,7 @@ private struct RecordingRowView: View {
         .contextMenu {
             if !filenamesBlurred {
                 Button("Rename\u{2026}", action: startRenaming)
+                    .disabled(manager.transcriptionService.isTranscribing)
             }
             Button("Show in Finder") {
                 NSWorkspace.shared.activateFileViewerSelecting([recording.url])
@@ -1447,6 +1528,7 @@ private struct RecordingRowView: View {
     }
 
     private func startRenaming() {
+        guard !manager.transcriptionService.isTranscribing else { return }
         let stem = recording.url.deletingPathExtension().lastPathComponent
         let (_, name) = RecordingManager.parseFilenameParts(stem)
         renameText = name
@@ -2095,12 +2177,14 @@ private extension View {
     func instantPopover<PopoverContent: View>(
         isPresented: Binding<Bool>,
         arrowEdge: Edge,
+        onWindow: @escaping (NSWindow) -> Void = { _ in },
         @ViewBuilder content: @escaping () -> PopoverContent
     ) -> some View {
         overlay {
             InstantPopoverPresenter(
                 isPresented: isPresented,
                 arrowEdge: arrowEdge,
+                onWindow: onWindow,
                 content: { AnyView(content()) }
             )
             .allowsHitTesting(false)
@@ -2111,6 +2195,7 @@ private extension View {
 private struct InstantPopoverPresenter: NSViewRepresentable {
     @Binding var isPresented: Bool
     let arrowEdge: Edge
+    let onWindow: (NSWindow) -> Void
     let content: () -> AnyView
 
     func makeCoordinator() -> Coordinator {
@@ -2123,8 +2208,12 @@ private struct InstantPopoverPresenter: NSViewRepresentable {
 
     func updateNSView(_ nsView: NSView, context: Context) {
         context.coordinator.isPresented = $isPresented
+        if let window = nsView.window {
+            onWindow(window)
+        }
 
         if isPresented {
+            guard let generation = context.coordinator.beginPresentation() else { return }
             let popover = context.coordinator.popover ?? context.coordinator.makePopover()
             let controller = context.coordinator.hostingController ?? context.coordinator.makeHostingController()
             controller.rootView = content()
@@ -2132,19 +2221,45 @@ private struct InstantPopoverPresenter: NSViewRepresentable {
 
             guard !popover.isShown else { return }
             if nsView.window != nil {
-                show(popover, anchoredTo: nsView)
+                show(
+                    popover,
+                    anchoredTo: nsView,
+                    coordinator: context.coordinator,
+                    generation: generation
+                )
             } else {
                 DispatchQueue.main.async {
-                    guard isPresented, nsView.window != nil, !popover.isShown else { return }
-                    show(popover, anchoredTo: nsView)
+                    guard context.coordinator.isCurrentPresentation(generation),
+                          context.coordinator.isPresented.wrappedValue,
+                          nsView.window != nil,
+                          !popover.isShown else { return }
+                    show(
+                        popover,
+                        anchoredTo: nsView,
+                        coordinator: context.coordinator,
+                        generation: generation
+                    )
                 }
             }
-        } else if context.coordinator.popover?.isShown == true {
+        } else {
             context.coordinator.closeFromBinding()
         }
     }
 
-    private func show(_ popover: NSPopover, anchoredTo nsView: NSView) {
+    private func show(
+        _ popover: NSPopover,
+        anchoredTo nsView: NSView,
+        coordinator: Coordinator,
+        generation: UInt
+    ) {
+        guard coordinator.isCurrentPresentation(generation),
+              coordinator.isPresented.wrappedValue,
+              let window = nsView.window else { return }
+        onWindow(window)
+        coordinator.pin(window: window)
+        // The anchor is already in the visible MenuBarExtra window. Making that
+        // panel key here can cause SwiftUI to re-anchor it to another display;
+        // NSPopover can show from the existing host without moving the panel.
         popover.show(
             relativeTo: nsView.bounds,
             of: nsView,
@@ -2158,6 +2273,11 @@ private struct InstantPopoverPresenter: NSViewRepresentable {
         var popover: NSPopover?
         var hostingController: NSHostingController<AnyView>?
         private var closingFromBinding = false
+        private weak var pinnedWindow: NSWindow?
+        private var previousHidesOnDeactivate: Bool?
+        private var presentationGeneration: UInt = 0
+        private var presentationActive = false
+        private var pendingDismissalGeneration: UInt?
 
         init(isPresented: Binding<Bool>) {
             self.isPresented = isPresented
@@ -2178,16 +2298,64 @@ private struct InstantPopoverPresenter: NSViewRepresentable {
             return controller
         }
 
+        func beginPresentation() -> UInt? {
+            guard pendingDismissalGeneration == nil else { return nil }
+            if !presentationActive {
+                presentationGeneration &+= 1
+                presentationActive = true
+            }
+            return presentationGeneration
+        }
+
+        func isCurrentPresentation(_ generation: UInt) -> Bool {
+            presentationActive && presentationGeneration == generation
+        }
+
+        func pin(window: NSWindow) {
+            if pinnedWindow !== window {
+                restoreWindowPin()
+                pinnedWindow = window
+                previousHidesOnDeactivate = window.hidesOnDeactivate
+            }
+            window.hidesOnDeactivate = false
+        }
+
+        private func restoreWindowPin() {
+            if let window = pinnedWindow, let previousHidesOnDeactivate {
+                window.hidesOnDeactivate = previousHidesOnDeactivate
+            }
+            pinnedWindow = nil
+            previousHidesOnDeactivate = nil
+        }
+
         func closeFromBinding() {
+            guard presentationActive
+                || popover?.isShown == true
+                || pendingDismissalGeneration != nil else { return }
             closingFromBinding = true
             popover?.close()
+            restoreWindowPin()
+            presentationActive = false
+            pendingDismissalGeneration = nil
+            presentationGeneration &+= 1
             closingFromBinding = false
         }
 
         func popoverDidClose(_ notification: Notification) {
+            restoreWindowPin()
             guard !closingFromBinding else { return }
+            let generation = presentationGeneration
+            presentationActive = false
+            pendingDismissalGeneration = generation
             DispatchQueue.main.async {
+                guard self.pendingDismissalGeneration == generation else { return }
+                guard self.presentationGeneration == generation,
+                      self.isPresented.wrappedValue else {
+                    self.pendingDismissalGeneration = nil
+                    return
+                }
                 self.isPresented.wrappedValue = false
+                self.pendingDismissalGeneration = nil
             }
         }
     }
@@ -2289,6 +2457,8 @@ struct TranscriptionConfigPopover: View {
     @Binding var config: TranscriptionConfig
     var onTranscribe: () -> Void
     var onCancel: () -> Void
+    var isTranscribeDisabled = false
+    var message: String?
 
     var body: some View {
         VStack(alignment: .leading, spacing: 8) {
@@ -2297,12 +2467,20 @@ struct TranscriptionConfigPopover: View {
 
             TranscriptionConfigForm(config: $config)
 
+            if let message {
+                Text(message)
+                    .font(.caption2)
+                    .foregroundStyle(.red)
+                    .fixedSize(horizontal: false, vertical: true)
+            }
+
             HStack {
                 Button("Cancel", action: onCancel)
                     .keyboardShortcut(.cancelAction)
                 Spacer()
                 Button("Transcribe", action: onTranscribe)
                     .keyboardShortcut(.defaultAction)
+                    .disabled(isTranscribeDisabled)
             }
         }
         .padding(10)

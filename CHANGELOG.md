@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.1] - 2026-10-06
+
+### Changed
+  * Show post-recording transcription controls immediately and keep Transcribe disabled until the recording is ready.
+  * Keep the menu bar panel and transcription popovers anchored to the active display as recording state changes.
+
+### Fixed
+  * Keep capture waveform bars, selection, and handles on the same timeline while the buffer fills and resizes.
+  * Disable recording renaming during transcription so progress and cancellation controls remain attached to the active recording.
+
 ## [0.14.0] - 2026-09-25
 
 ### Added

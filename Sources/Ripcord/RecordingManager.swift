@@ -192,6 +192,10 @@ final class RecordingManager: @unchecked Sendable {
     private var micLatencySettingsByUID: [String: MicLatencySettings] = [:]
     var postRecordingTranscriptionMode: PostRecordingTranscriptionMode = .none
     private(set) var pendingPostRecordingTranscription: RecordingInfo?
+    private(set) var postRecordingTranscriptionPromptRequested = false
+    private(set) var postRecordingTranscriptionError: String?
+    var isFinalizingRecording = false
+    private var postRecordingTranscriptionPromptOwner: UUID?
     var transcriptionConfig: TranscriptionConfig = TranscriptionConfig()
     var silenceAutoPauseEnabled: Bool = false
     var silenceThreshold: Float = 0.01
@@ -669,7 +673,7 @@ final class RecordingManager: @unchecked Sendable {
             guard let self else { return }
             // Skip reload while recording — stopRecording handles list insertion itself,
             // and the file write/finalize events would cause stale or duplicate entries.
-            if self.state == .recording || self.state == .paused { return }
+            if self.state == .recording || self.state == .paused || self.isFinalizingRecording { return }
             Task { await self.loadRecentRecordings() }
         }
         source.setCancelHandler { close(fd) }
@@ -742,8 +746,12 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func startRecording() {
-        guard state == .buffering, !isEditingLatestRecording else { return }
+        guard state == .buffering, !isEditingLatestRecording, !isFinalizingRecording else { return }
         logger.error("Recording started")
+        postRecordingTranscriptionPromptRequested = false
+        postRecordingTranscriptionError = nil
+        pendingPostRecordingTranscription = nil
+        postRecordingTranscriptionPromptOwner = nil
         refreshSystemMicMode()
         if systemMicMode.isVoiceIsolation {
             logger.error("Recording while macOS Mic Mode is Voice Isolation; non-voice USB inputs may be attenuated")
@@ -877,8 +885,8 @@ final class RecordingManager: @unchecked Sendable {
         }
     }
 
-    func stopRecording() {
-        guard state == .recording || state == .paused else { return }
+    func stopRecording(promptHostID: UUID? = nil) {
+        guard (state == .recording || state == .paused), !isFinalizingRecording else { return }
         logger.error("Recording stopping")
         let stopFrame = currentVisibleCaptureRange().end
         let finalizedSpans = selectionTimelineLock.withLock { () -> [SourceOutputSpan] in
@@ -892,6 +900,14 @@ final class RecordingManager: @unchecked Sendable {
         autoLiveTranscriptStartedForRecording = false
         let skipAutomaticTranscription = skipAutomaticTranscriptionForRecording
         skipAutomaticTranscriptionForRecording = false
+        let transcriptionMode = postRecordingTranscriptionMode
+        let shouldPrompt = transcriptionService.modelsReady
+            && !skipAutomaticTranscription
+            && transcriptionMode == .prompt
+        postRecordingTranscriptionPromptRequested = shouldPrompt
+        postRecordingTranscriptionError = nil
+        pendingPostRecordingTranscription = nil
+        postRecordingTranscriptionPromptOwner = shouldPrompt ? promptHostID : nil
 
         // Finalize any ongoing pause
         if let pauseStart = pauseStartTime {
@@ -923,93 +939,129 @@ final class RecordingManager: @unchecked Sendable {
             micCapture.stopNativeDebugRecording()
         }
 
-        // Flush remaining samples, cancel timer, and finalize writer on writeQueue
-        var result: Result<RecordingInfo, Error>?
-        writeQueue.sync {
-            // Cancel timer on its owning queue
-            self.writeTimer?.cancel()
-            self.writeTimer = nil
-
-            self.commitSelectedTimeline(upTo: stopFrame)
-
-            // Finalize
-            guard let w = self.writer else {
-                result = .failure(RecordingError.noWriter)
-                return
-            }
-
-            if let writeError = self.writeError {
-                _ = try? w.finalize()
-                result = .failure(writeError)
-            } else {
-                do {
-                    let info = try w.finalize()
-                    result = .success(info)
-                } catch {
-                    result = .failure(error)
-                }
-            }
-
-            self.writer = nil
-            self.writeError = nil
-        }
+        // Publish the stopped state before finalization so the UI can present the
+        // transcription controls while the file is still being finalized.
+        isFinalizingRecording = true
+        state = .buffering
 
         // Apply recording name (user may have typed it during recording)
         let sanitizedName = Self.sanitizeRecordingName(recordingName)
         addToNameHistory(sanitizedName)
         recordingName = ""
 
-        if !sanitizedName.isEmpty, case .success(var info) = result {
-            let ext = info.url.pathExtension
-            let stem = info.url.deletingPathExtension().lastPathComponent
-            let newFilename = stem + "_" + sanitizedName + "." + ext
-            let newURL = info.url.deletingLastPathComponent().appendingPathComponent(newFilename)
-            do {
-                try FileManager.default.moveItem(at: info.url, to: newURL)
-                info.url = newURL
-                result = .success(info)
-            } catch {
-                // Rename failed; keep original filename
-            }
-        }
+        // Flush remaining samples, cancel the timer, and finalize the writer off
+        // the main thread. The completion returns to the main queue only after
+        // the file is complete.
+        writeQueue.async { [weak self] in
+            guard let self else { return }
+            var finalizedInfo: RecordingInfo?
+            var failureMessage: String?
 
-        // Update state based on result
-        switch result {
-        case .success(let info):
-            logger.error("Recording stopped: \(info.url.lastPathComponent) (\(info.formattedDuration), \(info.formattedSize))")
-            recentRecordings.removeAll { $0.url == info.url }
-            recentRecordings.insert(info, at: 0)
-            UserDefaults.standard.set(true, forKey: SettingsKey.hasRecordedBefore)
-            if let fingerprint = Self.fingerprint(for: info.url) {
-                latestFinalizedDescriptor = FinalizedRecordingDescriptor(
-                    recording: info,
-                    spans: finalizedSpans,
-                    split: recordingSplitSnapshot,
-                    format: recordingFormatSnapshot,
-                    quality: recordingQualitySnapshot,
-                    micAdvanceFrames: recordingMicAdvanceSnapshot,
-                    fingerprint: fingerprint
-                )
+            self.writeTimer?.cancel()
+            self.writeTimer = nil
+            self.commitSelectedTimeline(upTo: stopFrame)
+
+            if let writer = self.writer {
+                if let writeError = self.writeError {
+                    _ = try? writer.finalize()
+                    failureMessage = writeError.localizedDescription
+                } else {
+                    do {
+                        finalizedInfo = try writer.finalize()
+                    } catch {
+                        failureMessage = error.localizedDescription
+                    }
+                }
             } else {
-                latestFinalizedDescriptor = nil
+                failureMessage = RecordingError.noWriter.localizedDescription
             }
-            state = .buffering
-            if transcriptionService.modelsReady && !skipAutomaticTranscription {
-                switch postRecordingTranscriptionMode {
-                case .none:
-                    break
-                case .prompt:
-                    pendingPostRecordingTranscription = info
-                case .automatic:
-                    transcribeRecording(info)
+
+            self.writer = nil
+            self.writeError = nil
+
+            if var info = finalizedInfo, !sanitizedName.isEmpty {
+                let ext = info.url.pathExtension
+                let stem = info.url.deletingPathExtension().lastPathComponent
+                let newFilename = stem + "_" + sanitizedName + "." + ext
+                let newURL = info.url.deletingLastPathComponent().appendingPathComponent(newFilename)
+                do {
+                    try FileManager.default.moveItem(at: info.url, to: newURL)
+                    info.url = newURL
+                    finalizedInfo = info
+                } catch {
+                    // Rename failed; keep original filename
                 }
             }
-        case .failure(let error):
-            logger.error("Recording failed: \(error.localizedDescription)")
-            state = .error("Recording failed: \(error.localizedDescription)")
-        case .none:
-            state = .buffering
+
+            DispatchQueue.main.async { [weak self] in
+                self?.finishStoppingRecording(
+                    info: finalizedInfo,
+                    failureMessage: failureMessage,
+                    finalizedSpans: finalizedSpans,
+                    skipAutomaticTranscription: skipAutomaticTranscription,
+                    transcriptionMode: transcriptionMode
+                )
+            }
         }
+    }
+
+    private func finishStoppingRecording(
+        info: RecordingInfo?,
+        failureMessage: String?,
+        finalizedSpans: [SourceOutputSpan],
+        skipAutomaticTranscription: Bool,
+        transcriptionMode: PostRecordingTranscriptionMode
+    ) {
+        isFinalizingRecording = false
+
+        guard let info else {
+            let message = failureMessage ?? "Unknown recording error"
+            logger.error("Recording failed: \(message)")
+            state = .error("Recording failed: \(message)")
+            if postRecordingTranscriptionPromptRequested {
+                postRecordingTranscriptionError = "Couldn’t save the recording."
+            }
+            return
+        }
+
+        logger.error("Recording stopped: \(info.url.lastPathComponent) (\(info.formattedDuration), \(info.formattedSize))")
+        recentRecordings.removeAll { $0.url == info.url }
+        recentRecordings.insert(info, at: 0)
+        UserDefaults.standard.set(true, forKey: SettingsKey.hasRecordedBefore)
+        if let fingerprint = Self.fingerprint(for: info.url) {
+            latestFinalizedDescriptor = FinalizedRecordingDescriptor(
+                recording: info,
+                spans: finalizedSpans,
+                split: recordingSplitSnapshot,
+                format: recordingFormatSnapshot,
+                quality: recordingQualitySnapshot,
+                micAdvanceFrames: recordingMicAdvanceSnapshot,
+                fingerprint: fingerprint
+            )
+        } else {
+            latestFinalizedDescriptor = nil
+        }
+        state = .buffering
+        postRecordingTranscriptionError = nil
+        if transcriptionService.modelsReady && !skipAutomaticTranscription {
+            switch transcriptionMode {
+            case .none:
+                break
+            case .prompt:
+                if postRecordingTranscriptionPromptRequested {
+                    pendingPostRecordingTranscription = info
+                }
+            case .automatic:
+                transcribeRecording(info)
+            }
+        }
+    }
+
+    func cancelPendingPostRecordingTranscription() {
+        postRecordingTranscriptionPromptRequested = false
+        postRecordingTranscriptionError = nil
+        pendingPostRecordingTranscription = nil
+        postRecordingTranscriptionPromptOwner = nil
     }
 
     func pauseRecording() {
@@ -1105,7 +1157,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func updateBufferDuration(_ seconds: Int) {
-        guard state != .recording && state != .paused else { return }
+        guard state != .recording && state != .paused && !isFinalizingRecording else { return }
         if isEditingLatestRecording { cancelLatestRecordingEdit() }
         latestFinalizedDescriptor = nil
         bufferDurationSeconds = seconds
@@ -1312,9 +1364,25 @@ final class RecordingManager: @unchecked Sendable {
         UserDefaults.standard.set(mode.rawValue, forKey: SettingsKey.postRecordingTranscriptionMode)
     }
 
-    func consumePendingPostRecordingTranscription() -> RecordingInfo? {
+    func claimPostRecordingTranscriptionPrompt(for hostID: UUID) -> Bool {
+        guard postRecordingTranscriptionPromptRequested else { return false }
+        if let owner = postRecordingTranscriptionPromptOwner {
+            return owner == hostID
+        }
+        postRecordingTranscriptionPromptOwner = hostID
+        return true
+    }
+
+    func consumePendingPostRecordingTranscription(for hostID: UUID) -> RecordingInfo? {
+        if let owner = postRecordingTranscriptionPromptOwner {
+            guard owner == hostID else { return nil }
+        } else {
+            postRecordingTranscriptionPromptOwner = hostID
+        }
         let target = pendingPostRecordingTranscription
         pendingPostRecordingTranscription = nil
+        postRecordingTranscriptionPromptRequested = false
+        postRecordingTranscriptionError = nil
         return target
     }
 
@@ -1639,6 +1707,7 @@ final class RecordingManager: @unchecked Sendable {
     }
 
     func renameRecording(_ recording: RecordingInfo, to newName: String) {
+        guard !transcriptionService.isTranscribing else { return }
         let sanitized = Self.sanitizeRecordingName(newName)
         let oldURL = recording.url
         let dir = oldURL.deletingLastPathComponent()

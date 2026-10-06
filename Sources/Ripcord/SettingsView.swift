@@ -43,7 +43,9 @@ struct SettingsView: View {
     @State private var speakersExpanded = false
     @State private var advancedExpanded = false
 
-    private var isRecording: Bool { manager.state == .recording || manager.state == .paused }
+    private var isRecording: Bool {
+        manager.state == .recording || manager.state == .paused || manager.isFinalizingRecording
+    }
 
     var body: some View {
         HStack(alignment: .top, spacing: 0) {

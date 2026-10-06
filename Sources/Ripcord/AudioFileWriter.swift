@@ -251,7 +251,7 @@ final class AudioFileWriter: @unchecked Sendable {
     }
 }
 
-struct RecordingInfo {
+struct RecordingInfo: Equatable, Sendable {
     var url: URL
     let duration: Double
     let fileSize: UInt64
