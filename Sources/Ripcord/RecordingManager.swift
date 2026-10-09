@@ -636,7 +636,12 @@ final class RecordingManager: @unchecked Sendable {
                 return existing
             }
             let duration = Self.audioDuration(url: candidate.url) ?? 0
-            return RecordingInfo(url: candidate.url, duration: duration, fileSize: candidate.size)
+            return RecordingInfo(
+                url: candidate.url,
+                duration: duration,
+                fileSize: candidate.size,
+                channelsAreSplit: Self.readChannelSplit(for: candidate.url)
+            )
         }
 
         await MainActor.run {
@@ -699,6 +704,31 @@ final class RecordingManager: @unchecked Sendable {
         guard d.timescale > 0 else { return nil }
         let s = CMTimeGetSeconds(d)
         return s.isFinite ? s : nil
+    }
+
+    private struct RecordingChannelMetadata: Codable {
+        let version: Int
+        let channelsAreSplit: Bool
+    }
+
+    private static func recordingChannelMetadataURL(for recordingURL: URL) -> URL {
+        let directory = recordingURL.deletingLastPathComponent()
+        let stem = recordingURL.deletingPathExtension().lastPathComponent
+        return directory.appendingPathComponent(".\(stem).ripcord.json")
+    }
+
+    private static func readChannelSplit(for recordingURL: URL) -> Bool? {
+        let metadataURL = recordingChannelMetadataURL(for: recordingURL)
+        guard let data = try? Data(contentsOf: metadataURL),
+              let metadata = try? JSONDecoder().decode(RecordingChannelMetadata.self, from: data),
+              metadata.version == 1 else { return nil }
+        return metadata.channelsAreSplit
+    }
+
+    private static func writeChannelSplit(_ split: Bool, for recordingURL: URL) {
+        let metadata = RecordingChannelMetadata(version: 1, channelsAreSplit: split)
+        guard let data = try? JSONEncoder().encode(metadata) else { return }
+        try? data.write(to: recordingChannelMetadataURL(for: recordingURL), options: .atomic)
     }
 
     private static func fingerprint(for url: URL) -> FinalizedRecordingDescriptor.Fingerprint? {
@@ -1014,7 +1044,7 @@ final class RecordingManager: @unchecked Sendable {
     ) {
         isFinalizingRecording = false
 
-        guard let info else {
+        guard var info else {
             let message = failureMessage ?? "Unknown recording error"
             logger.error("Recording failed: \(message)")
             state = .error("Recording failed: \(message)")
@@ -1023,6 +1053,9 @@ final class RecordingManager: @unchecked Sendable {
             }
             return
         }
+
+        info.channelsAreSplit = recordingSplitSnapshot
+        Self.writeChannelSplit(recordingSplitSnapshot, for: info.url)
 
         logger.error("Recording stopped: \(info.url.lastPathComponent) (\(info.formattedDuration), \(info.formattedSize))")
         recentRecordings.removeAll { $0.url == info.url }
@@ -1293,6 +1326,8 @@ final class RecordingManager: @unchecked Sendable {
             Self.synchronizeDirectory(containing: recording.url)
             var updated = rendered
             updated.url = recording.url
+            updated.channelsAreSplit = descriptor.split
+            Self.writeChannelSplit(descriptor.split, for: recording.url)
             recentRecordings.removeAll { $0.url == recording.url }
             recentRecordings.insert(updated, at: 0)
             let newRanges = RecordingSelectionTimeline.coalesced(
@@ -1456,11 +1491,21 @@ final class RecordingManager: @unchecked Sendable {
     func transcribeRecording(_ recording: RecordingInfo, config: TranscriptionConfig? = nil, overwrite: Bool = false) {
         guard transcriptionService.modelsReady else { return }
         let effectiveConfig = config ?? transcriptionConfig
+        let channelsAreSplit: Bool
+        if let savedValue = recording.channelsAreSplit {
+            channelsAreSplit = savedValue
+        } else if let descriptor = latestFinalizedDescriptor,
+                  descriptor.recording.url == recording.url {
+            channelsAreSplit = descriptor.split
+        } else {
+            channelsAreSplit = false
+        }
         transcriptionService.startTranscription(
             fileURL: recording.url,
             audioDuration: recording.duration,
             config: effectiveConfig,
-            overwrite: overwrite
+            overwrite: overwrite,
+            channelsAreSplit: channelsAreSplit
         )
     }
 
@@ -1474,7 +1519,12 @@ final class RecordingManager: @unchecked Sendable {
         let attrs = try? FileManager.default.attributesOfItem(atPath: url.path)
         let size = attrs?[.size] as? UInt64 ?? 0
         let duration = Self.audioDuration(url: url) ?? 0
-        let info = RecordingInfo(url: url, duration: duration, fileSize: size)
+        let info = RecordingInfo(
+            url: url,
+            duration: duration,
+            fileSize: size,
+            channelsAreSplit: Self.readChannelSplit(for: url)
+        )
         recentRecordings.insert(info, at: 0)
         transcribeRecording(info, config: config, overwrite: overwrite)
     }
@@ -1731,6 +1781,18 @@ final class RecordingManager: @unchecked Sendable {
             try fm.moveItem(at: oldURL, to: newURL)
         } catch {
             return
+        }
+
+        let oldMetadataURL = Self.recordingChannelMetadataURL(for: oldURL)
+        let newMetadataURL = Self.recordingChannelMetadataURL(for: newURL)
+        if fm.fileExists(atPath: oldMetadataURL.path) {
+            try? fm.moveItem(at: oldMetadataURL, to: newMetadataURL)
+        }
+        if let split = recording.channelsAreSplit {
+            Self.writeChannelSplit(split, for: newURL)
+        } else if let descriptor = latestFinalizedDescriptor,
+                  descriptor.recording.url == oldURL {
+            Self.writeChannelSplit(descriptor.split, for: newURL)
         }
 
         // Rename associated transcript files (including -1, -2, etc. variants)

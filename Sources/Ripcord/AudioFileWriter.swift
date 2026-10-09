@@ -255,6 +255,7 @@ struct RecordingInfo: Equatable, Sendable {
     var url: URL
     let duration: Double
     let fileSize: UInt64
+    var channelsAreSplit: Bool? = nil
 
     var formattedDuration: String {
         let minutes = Int(duration) / 60

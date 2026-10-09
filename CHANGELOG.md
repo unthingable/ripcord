@@ -1,5 +1,15 @@
 # Changelog
 
+## [0.14.2] - 2026-10-09
+
+### Changed
+  * Diarize local microphone and remote system channels independently for split-channel recordings.
+
+### Fixed
+  * Preserve microphone diarization when the system channel contains no speech.
+  * Keep unsupported diarization engines on the full mixed audio instead of isolating only the system channel.
+  * Remove unassigned speaker profiles and merge near-identical profiles after speaker re-verification.
+
 ## [0.14.1] - 2026-10-06
 
 ### Changed

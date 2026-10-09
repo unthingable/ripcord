@@ -11,6 +11,9 @@ public enum TranscriptionPhase: String, Sendable {
 }
 
 public final class Transcriber: @unchecked Sendable {
+    /// High threshold avoids merging merely similar voices; this is only for near-identical centroids.
+    private static let nearDuplicateSpeakerCosineThreshold: Float = 0.98
+
     private let lock = NSLock()
     private var asrManager: AsrManager?
 
@@ -85,6 +88,7 @@ public final class Transcriber: @unchecked Sendable {
     public func transcribe(
         fileURL: URL,
         diarization: DiarizationConfig? = DiarizationConfig(),
+        channelsAreSeparated: Bool = false,
         startTime: Double? = nil,
         endTime: Double? = nil,
         progress: @escaping @Sendable (TranscriptionPhase, Double?) -> Void = { _, _ in }
@@ -97,6 +101,28 @@ public final class Transcriber: @unchecked Sendable {
         let (processURL, cleanup) = try await AudioPreprocessor.prepareAudio(
             from: fileURL, startTime: startTime, endTime: endTime)
         defer { cleanup() }
+
+        var diarizationURL = processURL
+        var hasSeparatedSystemChannel = false
+        var diarizationCleanup: (() -> Void)?
+        defer { diarizationCleanup?() }
+        if Self.shouldUseSplitChannelDiarization(
+            channelsAreSeparated: channelsAreSeparated,
+            engine: diarization?.engine
+        ) {
+            do {
+                let prepared = try await AudioPreprocessor.prepareAudio(
+                    from: fileURL, channel: 0, startTime: startTime, endTime: endTime)
+                diarizationURL = prepared.url
+                diarizationCleanup = prepared.cleanup
+                hasSeparatedSystemChannel = true
+            } catch is CancellationError {
+                throw CancellationError()
+            } catch {
+                os_log(.error, "Could not isolate system channel for diarization: %{public}@",
+                       error.localizedDescription)
+            }
+        }
 
         let audioDuration = await AudioPreprocessor.getAudioDuration(processURL)
         try Task.checkCancellation()
@@ -123,24 +149,36 @@ public final class Transcriber: @unchecked Sendable {
 
         // Diarization
         var diarizationResult: DiarizationResult?
+        var diarizationWasVerified = false
         if let config = diarization {
             progress(.diarizing, nil)
-            switch config.engine {
-            case .offline:
-                diarizationResult = try await diarizeOffline(fileURL: processURL, config: config)
-            case .lseend:
-                diarizationResult = try await diarizeWithLSEEND(fileURL: processURL)
-            case .sortformer:
-                diarizationResult = try await diarizeWithSortformer(fileURL: processURL)
+            if hasSeparatedSystemChannel, config.engine == .offline {
+                diarizationResult = try await diarizeSplitChannels(
+                    sourceURL: fileURL,
+                    systemURL: diarizationURL,
+                    config: config,
+                    startTime: startTime,
+                    endTime: endTime
+                )
+                diarizationWasVerified = true
+            } else {
+                switch config.engine {
+                case .offline:
+                    diarizationResult = try await diarizeOffline(fileURL: diarizationURL, config: config)
+                case .lseend:
+                    diarizationResult = try await diarizeWithLSEEND(fileURL: diarizationURL)
+                case .sortformer:
+                    diarizationResult = try await diarizeWithSortformer(fileURL: diarizationURL)
+                }
             }
         }
 
         try Task.checkCancellation()
 
         // Speaker re-verification: check segment embeddings against speaker profiles
-        if let dia = diarizationResult {
+        if let dia = diarizationResult, !diarizationWasVerified {
             diarizationResult = try await verifySpeakerAssignments(
-                dia, fileURL: processURL)
+                dia, fileURL: diarizationURL)
         }
 
         try Task.checkCancellation()
@@ -228,6 +266,138 @@ public final class Transcriber: @unchecked Sendable {
         let diarizer = OfflineDiarizerManager(config: diarizerConfig)
         try await diarizer.prepareModels()
         return try await diarizer.process(fileURL)
+    }
+
+    private func diarizeSplitChannels(
+        sourceURL: URL,
+        systemURL: URL,
+        config: DiarizationConfig,
+        startTime: Double?,
+        endTime: Double?
+    ) async throws -> DiarizationResult {
+        var localResult: DiarizationResult?
+        do {
+            let localAudio = try await AudioPreprocessor.prepareAudio(
+                from: sourceURL,
+                channel: 1,
+                normalize: false,
+                startTime: startTime,
+                endTime: endTime
+            )
+            defer { localAudio.cleanup() }
+
+            if try await AudioPreprocessor.hasMeaningfulSignal(in: localAudio.url) {
+                var localConfig = config
+                localConfig.speakerCount = .exactly(1)
+                localResult = try await diarizeOffline(fileURL: localAudio.url, config: localConfig)
+            }
+        } catch is CancellationError {
+            throw CancellationError()
+        } catch {
+            os_log(.error, "Could not diarize microphone channel separately: %{public}@",
+                   error.localizedDescription)
+        }
+
+        var systemConfig = config
+        if let localResult, !localResult.segments.isEmpty {
+            switch config.speakerCount {
+            case .auto:
+                break
+            case .exactly(let count):
+                systemConfig.speakerCount = .exactly(max(1, count - 1))
+            case .range(let min, let max):
+                systemConfig.speakerCount = .range(
+                    min: min.map { Swift.max(1, $0 - 1) },
+                    max: max.map { Swift.max(1, $0 - 1) }
+                )
+            }
+        }
+
+        let systemResult: DiarizationResult?
+        do {
+            systemResult = try await diarizeOffline(fileURL: systemURL, config: systemConfig)
+        } catch {
+            guard Self.shouldUseMicrophoneOnlyFallback(
+                for: error,
+                microphoneResult: localResult
+            ) else {
+                throw error
+            }
+            systemResult = nil
+            os_log(.info, "System channel has no speech; using microphone-channel diarization")
+        }
+
+        let verifiedSystem: DiarizationResult?
+        if let systemResult, !systemResult.segments.isEmpty {
+            verifiedSystem = try await verifySpeakerAssignments(systemResult, fileURL: systemURL)
+        } else {
+            verifiedSystem = systemResult
+        }
+        let combined = Self.combineSplitChannelResults(
+            system: verifiedSystem,
+            microphone: localResult
+        )
+
+        let systemSpeakerCount = Set(verifiedSystem?.segments.map(\.speakerId) ?? []).count
+        let localSegmentCount = localResult?.segments.count ?? 0
+        os_log(.info,
+               "Split-channel diarization: system speakers=%d, mic segments=%d",
+               systemSpeakerCount, localSegmentCount)
+        return combined
+    }
+
+    static func shouldUseSplitChannelDiarization(
+        channelsAreSeparated: Bool,
+        engine: DiarizationEngine?
+    ) -> Bool {
+        channelsAreSeparated && engine == .offline
+    }
+
+    static func shouldUseMicrophoneOnlyFallback(
+        for error: Error,
+        microphoneResult: DiarizationResult?
+    ) -> Bool {
+        guard let diarizationError = error as? OfflineDiarizationError,
+              case .noSpeechDetected = diarizationError,
+              let microphoneResult,
+              !microphoneResult.segments.isEmpty
+        else {
+            return false
+        }
+        return true
+    }
+
+    static func combineSplitChannelResults(
+        system: DiarizationResult?,
+        microphone: DiarizationResult?
+    ) -> DiarizationResult {
+        var segments = system?.segments ?? []
+        var speakerDatabase = system?.speakerDatabase ?? [:]
+
+        if let microphone, !microphone.segments.isEmpty {
+            segments.append(contentsOf: microphone.segments.map { segment in
+                TimedSpeakerSegment(
+                    speakerId: "LOCAL",
+                    embedding: segment.embedding,
+                    startTimeSeconds: segment.startTimeSeconds,
+                    endTimeSeconds: segment.endTimeSeconds,
+                    qualityScore: segment.qualityScore
+                )
+            })
+
+            let localSpeakers = Set(microphone.segments.map(\.speakerId))
+            if let embedding = microphone.speakerDatabase?
+                .filter({ localSpeakers.contains($0.key) })
+                .sorted(by: { $0.key < $1.key })
+                .first?.value {
+                speakerDatabase["LOCAL"] = embedding
+            }
+        }
+
+        segments.sort { $0.startTimeSeconds < $1.startTimeSeconds }
+        return removingUnassignedSpeakerProfiles(
+            from: DiarizationResult(segments: segments, speakerDatabase: speakerDatabase)
+        )
     }
 
     private func diarizeWithSortformer(fileURL: URL) async throws -> DiarizationResult {
@@ -324,9 +494,12 @@ public final class Transcriber: @unchecked Sendable {
         _ result: DiarizationResult,
         fileURL: URL
     ) async throws -> DiarizationResult {
+        let result = Self.removingUnassignedSpeakerProfiles(from: result)
         let segments = result.segments
         let speakerIds = Array(Set(segments.map(\.speakerId)).sorted())
-        guard speakerIds.count >= 2 else { return result }
+        guard speakerIds.count >= 2 else {
+            return Self.mergingNearDuplicateSpeakerProfiles(from: result)
+        }
 
         let models = try await DiarizerModels.download()
         let diarizerManager = DiarizerManager()
@@ -358,7 +531,9 @@ public final class Transcriber: @unchecked Sendable {
                 index: idx, embedding: embedding, duration: seg.durationSeconds))
         }
 
-        guard segEmbeddings.count >= 2 else { return result }
+        guard segEmbeddings.count >= 2 else {
+            return Self.mergingNearDuplicateSpeakerProfiles(from: result)
+        }
 
         // Step 2: Build speaker profiles from the longest segments per speaker
         var profiles: [String: [Float]] = [:]
@@ -391,7 +566,9 @@ public final class Transcriber: @unchecked Sendable {
             profiles[speakerId] = centroid
         }
 
-        guard profiles.count >= 2 else { return result }
+        guard profiles.count >= 2 else {
+            return Self.mergingNearDuplicateSpeakerProfiles(from: result)
+        }
 
         // Step 3: Re-verify each segment's assignment
         var corrected = segments
@@ -434,8 +611,142 @@ public final class Transcriber: @unchecked Sendable {
             os_log(.info, "Speaker re-verification: flipped %d/%d segments", flips, segEmbeddings.count)
         }
 
+        let correctedResult = DiarizationResult(
+            segments: corrected,
+            speakerDatabase: result.speakerDatabase
+        )
+        let cleanedResult = Self.removingUnassignedSpeakerProfiles(from: correctedResult)
+        return Self.mergingNearDuplicateSpeakerProfiles(from: cleanedResult)
+    }
+
+    static func removingUnassignedSpeakerProfiles(from result: DiarizationResult) -> DiarizationResult {
+        guard let speakerDatabase = result.speakerDatabase else { return result }
+        let assignedSpeakers = Set(result.segments.map(\.speakerId))
+        let retained = speakerDatabase.filter { assignedSpeakers.contains($0.key) }
         return DiarizationResult(
-            segments: corrected, speakerDatabase: result.speakerDatabase)
+            segments: result.segments,
+            speakerDatabase: retained.isEmpty ? nil : retained
+        )
+    }
+
+    static func mergingNearDuplicateSpeakerProfiles(from result: DiarizationResult) -> DiarizationResult {
+        let result = removingUnassignedSpeakerProfiles(from: result)
+        guard let speakerDatabase = result.speakerDatabase, speakerDatabase.count > 1 else {
+            return result
+        }
+
+        let speakerIDs = speakerDatabase.keys.sorted()
+        var clusters = speakerIDs.map { [$0] }
+        var didMerge = true
+        while didMerge {
+            didMerge = false
+            mergeLoop: for leftIndex in clusters.indices {
+                guard leftIndex + 1 < clusters.count else { continue }
+                for rightIndex in (leftIndex + 1)..<clusters.count {
+                    let isDuplicate = clusters[leftIndex].allSatisfy { leftID in
+                        clusters[rightIndex].allSatisfy { rightID in
+                            guard let similarity = Self.cosineSimilarity(
+                                speakerDatabase[leftID] ?? [], speakerDatabase[rightID] ?? [])
+                            else { return false }
+                            return similarity >= Self.nearDuplicateSpeakerCosineThreshold
+                        }
+                    }
+                    guard isDuplicate else { continue }
+                    clusters[leftIndex].append(contentsOf: clusters[rightIndex])
+                    clusters[leftIndex].sort()
+                    clusters.remove(at: rightIndex)
+                    didMerge = true
+                    break mergeLoop
+                }
+            }
+        }
+
+        guard clusters.contains(where: { $0.count > 1 }) else { return result }
+
+        var speakerMapping: [String: String] = [:]
+        var mergedDatabase: [String: [Float]] = [:]
+        let durationBySpeaker = result.segments.reduce(into: [String: Double]()) { totals, segment in
+            totals[segment.speakerId, default: 0] += Double(segment.durationSeconds)
+        }
+
+        for cluster in clusters {
+            let canonicalID = cluster.sorted {
+                let leftDuration = durationBySpeaker[$0, default: 0]
+                let rightDuration = durationBySpeaker[$1, default: 0]
+                return leftDuration == rightDuration ? $0 < $1 : leftDuration > rightDuration
+            }.first!
+            for speakerID in cluster { speakerMapping[speakerID] = canonicalID }
+
+            if cluster.count == 1, let embedding = speakerDatabase[canonicalID] {
+                mergedDatabase[canonicalID] = embedding
+            } else if let embedding = Self.centroid(
+                for: cluster, embeddings: speakerDatabase, weights: durationBySpeaker) {
+                mergedDatabase[canonicalID] = embedding
+            }
+        }
+
+        let mergedSegments = result.segments.map { segment in
+            TimedSpeakerSegment(
+                speakerId: speakerMapping[segment.speakerId] ?? segment.speakerId,
+                embedding: segment.embedding,
+                startTimeSeconds: segment.startTimeSeconds,
+                endTimeSeconds: segment.endTimeSeconds,
+                qualityScore: segment.qualityScore
+            )
+        }
+        let mergedResult = DiarizationResult(
+            segments: mergedSegments,
+            speakerDatabase: mergedDatabase.isEmpty ? nil : mergedDatabase
+        )
+        let originalCount = Set(result.segments.map(\.speakerId)).count
+        let mergedCount = Set(mergedSegments.map(\.speakerId)).count
+        if mergedCount < originalCount {
+            os_log(.info, "Merged near-identical speaker profiles: %d to %d",
+                   originalCount, mergedCount)
+        }
+        return mergedResult
+    }
+
+    private static func cosineSimilarity(_ lhs: [Float], _ rhs: [Float]) -> Float? {
+        guard lhs.count == rhs.count, !lhs.isEmpty else { return nil }
+        var dot: Double = 0
+        var lhsNorm: Double = 0
+        var rhsNorm: Double = 0
+        for (left, right) in zip(lhs, rhs) {
+            guard left.isFinite, right.isFinite else { return nil }
+            dot += Double(left) * Double(right)
+            lhsNorm += Double(left) * Double(left)
+            rhsNorm += Double(right) * Double(right)
+        }
+        guard lhsNorm > 0, rhsNorm > 0 else { return nil }
+        return Float(dot / (sqrt(lhsNorm) * sqrt(rhsNorm)))
+    }
+
+    private static func centroid(
+        for speakerIDs: [String],
+        embeddings: [String: [Float]],
+        weights: [String: Double]
+    ) -> [Float]? {
+        guard let firstID = speakerIDs.first,
+              let firstEmbedding = embeddings[firstID],
+              !firstEmbedding.isEmpty else { return nil }
+        let dimension = firstEmbedding.count
+        guard speakerIDs.allSatisfy({ embeddings[$0]?.count == dimension }) else { return nil }
+
+        var centroid = [Double](repeating: 0, count: dimension)
+        var totalWeight: Double = 0
+        for speakerID in speakerIDs {
+            guard let embedding = embeddings[speakerID] else { continue }
+            let weight = max(weights[speakerID, default: 0], 0.001)
+            totalWeight += weight
+            for index in 0..<dimension {
+                centroid[index] += Double(embedding[index]) * weight
+            }
+        }
+        guard totalWeight > 0 else { return nil }
+        let norm = sqrt(centroid.reduce(0.0) { $0 + $1 * $1 })
+        guard norm > 0 else { return nil }
+        return centroid.map { Float($0 / norm) }
     }
 
     // MARK: - Errors

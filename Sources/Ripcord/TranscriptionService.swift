@@ -111,7 +111,8 @@ final class TranscriptionService: @unchecked Sendable {
         fileURL: URL,
         audioDuration: TimeInterval,
         config: TranscriptionConfig,
-        overwrite: Bool = false
+        overwrite: Bool = false,
+        channelsAreSplit: Bool = false
     ) {
         let operationID = UUID()
         let startedAt = Date()
@@ -159,7 +160,8 @@ final class TranscriptionService: @unchecked Sendable {
             }
             do {
                 _ = try await self.transcribe(
-                    fileURL: fileURL, config: config, overwrite: overwrite, operationID: operationID)
+                    fileURL: fileURL, config: config, overwrite: overwrite,
+                    channelsAreSplit: channelsAreSplit, operationID: operationID)
             } catch is CancellationError {
                 // Cancelled — no error to show
             } catch {
@@ -222,6 +224,7 @@ final class TranscriptionService: @unchecked Sendable {
         fileURL: URL,
         config: TranscriptionConfig,
         overwrite: Bool = false,
+        channelsAreSplit: Bool,
         operationID: UUID
     ) async throws -> URL {
         try ensureCurrentOperation(operationID)
@@ -259,7 +262,9 @@ final class TranscriptionService: @unchecked Sendable {
             }
 
             let result = try await transcriber.transcribe(
-                fileURL: fileURL, diarization: diarization
+                fileURL: fileURL,
+                diarization: diarization,
+                channelsAreSeparated: channelsAreSplit
             ) { [weak self] phase, progress in
                 Task { @MainActor in
                     guard let self, self.isCurrentOperation(operationID) else { return }
