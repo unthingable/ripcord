@@ -38,7 +38,7 @@ bundle: build
 install: bundle
 	mkdir -p $(INSTALL_DIR)
 	rm -rf $(INSTALL_DIR)/$(BUNDLE)
-	cp -R $(BUNDLE) $(INSTALL_DIR)/$(BUNDLE)
+	ln -s "$(abspath $(BUNDLE))" $(INSTALL_DIR)/$(BUNDLE)
 
 test:
 	swift test
